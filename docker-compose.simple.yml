@@ -1,19 +1,20 @@
+# docker-compose.simple.yml
 version: '3.8'
 
 services:
   postgres:
     image: postgres:15-alpine
-    container_name: video_stats_db
-    env_file: .env  
+    container_name: video_stats_postgres
     environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: video_analytics
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/create_tables.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
 
 volumes:
   postgres_data:
