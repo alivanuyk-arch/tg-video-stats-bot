@@ -1,447 +1,353 @@
-"""
-Конструктор SQL запросов с битовыми масками
-"""
-
 import re
 import json
+import hashlib
 import logging
-from typing import Dict, List, Optional, Set, Any, Tuple
+from typing import Dict, List, Set, Optional, Any, Tuple
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass
-import hashlib
+from dataclasses import dataclass, asdict
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
+
+# ===================== ДАТАКЛАССЫ =====================
 
 @dataclass
 class ConstructorStats:
     """Статистика конструктора"""
-    total_words: int
     total_patterns: int
-    cache_size: int
-    fallback_patterns: int
-    most_used_pattern: Optional[List[str]]
-    most_used_count: int
+    exact_hits: int
+    pattern_hits: int
+    llm_calls: int
+
+# ===================== ОСНОВНОЙ КЛАСС =====================
 
 class QueryConstructor:
-    """Конструктор SQL запросов с битовыми масками"""
+    """Конструктор SQL запросов с обучением"""
     
-    def __init__(self, 
-                 cache_file: str = "query_cache.json",
-                 patterns_file: str = "learned_patterns.json",
-                 llm_client = None):
-        """
-        Args:
-            cache_file: файл для кэша точных запросов
-            patterns_file: файл для обученных паттернов
-            llm_client: клиент LLM (опционально)
-        """
-        self.cache_file = Path(cache_file)
-        self.patterns_file = Path(patterns_file)
-        self.llm_client = llm_client
+    def __init__(self, llm_client=None):
+        self.llm = llm_client
         
-        # Основные структуры
-        self.word_to_bit: Dict[str, int] = {}
-        self.bit_counter = 1
+        # Структуры данных
+        self.exact_cache: Dict[str, str] = {}
+        self.patterns: Dict[str, Dict] = {}
+        self.word_index: Dict[str, Set[str]] = defaultdict(set)
         
-        # Кэши
-        self.bit_combos: Dict[int, Dict] = {}  # mask → pattern data
-        self.exact_cache: Dict[str, str] = {}  # exact query → SQL
-        self.fallback_patterns: Dict[str, Dict] = {}  # hash → pattern
-       
-        # Инициализация
-        self._init_vocabulary()
-        self._learn_basic_patterns()
-       
-        # Загрузка данных
+        # Конфигурация
+        self.stop_words = {'и', 'в', 'с', 'по', 'за', 'у', 'о', 'от', 'есть', 'всего'}
+        
+        # Статистика
+        self.stats = {
+            'exact_hits': 0,
+            'pattern_hits': 0,
+            'llm_calls': 0,
+            'new_patterns': 0
+        }
+        
+        # Загрузка сохранённых данных
         self._load_data()
         
+        # Предзагрузка примеров ТЗ
+        self._init_tz_patterns()
         
-        
-        logger.info(f"QueryConstructor инициализирован: {len(self.word_to_bit)} слов")
+        logger.info(f"Конструктор инициализирован. Паттернов: {len(self.patterns)}")
     
-    # ===== ИНИЦИАЛИЗАЦИЯ =====
-    
-    def _init_vocabulary(self):
-        """Инициализация словаря значимых слов"""
-        # Локальный список
-        vocab = [
-            'сколько', 'сумма', 'среднее', 'максимум', 'минимум',
-            'количество', 'число', 'итого',
-            'видео', 'видеоролик', 'ролик',
-            'просмотр', 'просмотры', 'просмотров',
-            'лайк', 'лайки', 'лайков', 
-            'комментарий', 'комментарии', 'комментариев',
-            'жалоба', 'жалобы', 'жалоб',
-            'креатор', 'креатора', 'креаторов',
-            'автор', 'автора', 'авторов',
-            'больше', 'меньше', 'более', 'менее', 'равно',
-            'набрало', 'получило', 'вышло', 'создано',
-            'январь', 'января', 'февраль', 'февраля',
-            'март', 'марта', 'апрель', 'апреля',
-            'май', 'мая', 'июнь', 'июня',
-            'июль', 'июля', 'август', 'августа',
-            'сентябрь', 'сентября', 'октябрь', 'октября',
-            'ноябрь', 'ноября', 'декабрь', 'декабря',
-            '2024', '2025', 'дата', 'период', 'месяц', 'год',
-            'всего', 'разных', 'новые', 'прирост', 'рост',
-            'с', 'на', 'за', 'по', 'в', 'у',
+    def _init_tz_patterns(self):
+        """Предзагрузка примеров из ТЗ"""
+        tz_examples = [
+            ("Сколько всего видео есть в системе?", "SELECT COUNT(*) FROM videos"),
+            ("Сколько видео набрало больше 100000 просмотров?", "SELECT COUNT(*) FROM videos WHERE views_count > {NUMBER}"),
+            ("На сколько просмотров выросли все видео 28 ноября 2025?", "SELECT SUM(delta_views_count) FROM video_snapshots WHERE DATE(created_at) = '{DATE}'"),
+            ("Сколько разных видео получали новые просмотры 27 ноября 2025?", "SELECT COUNT(DISTINCT video_id) FROM video_snapshots WHERE DATE(created_at) = '{DATE}' AND delta_views_count > 0"),
+            ("Сколько видео у креатора с id abc123?", "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}'"),
+            ("Сколько видео у креатора с id abc123 вышло с 1 по 5 ноября 2025?", "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND DATE(video_created_at) BETWEEN '{DATE1}' AND '{DATE2}'"),
+            ("Сколько видео у креатора с id abc123 вышло с 1 ноября 2025 по 28 ноября 2025 включительно?", "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND DATE(video_created_at) BETWEEN '{DATE1}' AND '{DATE2}'"),
         ]
         
-        # Добавляем слова
-        for word in vocab:
-            self._get_bit_for_word(word)
+        for query, sql in tz_examples:
+            words = self._extract_words(query)
+            self._learn_from_example(query, sql, words, 'tz')
+            self.exact_cache[query] = sql
     
-    def _learn_basic_patterns(self):
-        """Обучение на базовых примерах"""
-        examples = [
-            ("Сколько всего видео есть в системе?", 
-             "SELECT COUNT(*) FROM videos"),
-            
-            ("Сколько видео набрало больше 100000 просмотров?", 
-             "SELECT COUNT(*) FROM videos WHERE views_count > 100000"),
-            
-            ("На сколько просмотров выросли все видео 2025-11-28?", 
-             "SELECT SUM(delta_views_count) FROM video_snapshots WHERE DATE(created_at) = '2025-11-28'"),
-            
-            ("Сколько разных видео получали новые просмотры 2025-11-27?", 
-             "SELECT COUNT(DISTINCT video_id) FROM video_snapshots WHERE DATE(created_at) = '2025-11-27' AND delta_views_count > 0"),
-            
-            ("Сумма просмотров", "SELECT SUM(views_count) FROM videos"),
-            ("Средние лайки", "SELECT AVG(likes_count) FROM videos"),
-        ]
-        
-        for query, sql in examples:
-            self.learn_from_example(query, sql, 'manual')
+    # ===================== ОСНОВНОЙ МЕТОД =====================
     
-    # ===== БИТОВАЯ ЛОГИКА =====
-    
-    def _get_bit_for_word(self, word: str) -> int:
-        """Получаем бит для слова"""
-        if word not in self.word_to_bit:
-            self.word_to_bit[word] = self.bit_counter
-            self.bit_counter <<= 1
-        return self.word_to_bit[word]
-    
-    def _query_to_bits(self, query: str) -> Tuple[Set[int], List[str], List[str]]:
-        """
-        Анализ запроса
-        Returns: (биты, известные слова, неизвестные слова)
-        """
-        query_lower = query.lower()
-        words = query_lower.split()
-        
-        bits = set()
-        known_words = []
-        unknown_words = []
-        
-        # 1. Известные слова
-        for word in words:
-            if word in self.word_to_bit:
-                bits.add(self.word_to_bit[word])
-                known_words.append(word)
-            elif len(word) > 2:  # Игнорируем предлоги и т.п.
-                unknown_words.append(word)
-        
-        # 2. Специальные биты
-        if re.search(r'\b\d+\b', query_lower):
-            bits.add(1 << 30)  # Бит "есть число"
-        
-        if re.search(r'\d{4}-\d{2}-\d{2}', query_lower):
-            bits.add(1 << 31)  # Бит "есть SQL дата"
-        
-        if re.search(r'\d{1,2}\s+\w+\s+\d{4}', query_lower):
-            bits.add(1 << 29)  # Бит "есть русская дата"
-        
-        if re.search(r'[a-f0-9-]{36}', query_lower):
-            bits.add(1 << 28)  # Бит "есть UUID"
-        
-        return bits, known_words, unknown_words
-    
-    def _bits_to_mask(self, bits: Set[int]) -> int:
-        """Биты → маска"""
-        mask = 0
-        for bit in bits:
-            mask |= bit
-        return mask
-    
-    # ===== ОБУЧЕНИЕ =====
-    
-    def learn_from_example(self, query: str, sql: str, source: str = 'llm'):
-        """Учимся на примере запрос→SQL"""
-        bits, known_words, unknown_words = self._query_to_bits(query)
-        mask = self._bits_to_mask(bits)
-        
-        # Создаём SQL шаблон
-        sql_template = self._generalize_sql(sql)
-        
-        if known_words:
-            # Сохраняем в битовые комбинации
-            if mask in self.bit_combos:
-                self.bit_combos[mask]['count'] += 1
-                self.bit_combos[mask]['examples'].append(query)
-            else:
-                self.bit_combos[mask] = {
-                    'template': sql_template,
-                    'examples': [query],
-                    'count': 1,
-                    'words': known_words,
-                    'unknown_words': unknown_words,
-                    'created_at': datetime.now().isoformat(),
-                    'source': source
-                }
-        else:
-            # Fallback: сохраняем по хешу
-            pattern_hash = self._create_pattern_hash(query)
-            self.fallback_patterns[pattern_hash] = {
-                'sql': sql,
-                'template': sql_template,
-                'query': query,
-                'count': 1,
-                'type': 'fallback',
-                'source': source
-            }
-        
-        # Сохраняем точный запрос
-        self.exact_cache[query] = sql
-        
-        self._save_data()
-        logger.info(f"Выучен паттерн: {known_words or ['fallback']}")
-    
-    def _generalize_sql(self, sql: str) -> str:
-        """Обобщение SQL"""
-        template = sql
-        
-        template = re.sub(r'\b\d+\b', '{N}', template)
-        template = re.sub(r"'(\d{4}-\d{2}-\d{2})'", "'{DATE}'", template)
-        template = re.sub(r"'([a-f0-9-]{36})'", "'{ID}'", template)
-        
-        return template
-    
-    def _create_pattern_hash(self, query: str) -> str:
-        """Создаёт хеш для fallback паттернов"""
-        normalized = re.sub(r'\s+', ' ', query.lower().strip())
-        return hashlib.md5(normalized.encode()).hexdigest()[:16]
-    
-    # ===== ПОИСК =====
-    
-    def find_best_match(self, query: str) -> Optional[Dict]:  # ← ДОЛЖНО БЫТЬ 4 ПРОБЕЛА!
-        """Поиск лучшего совпадения"""
-        bits, known_words, unknown_words = self._query_to_bits(query)
-        
+    async def build_sql_async(self, user_query: str, use_llm: bool = True) -> str:
+        """Асинхронная версия build_sql с LLM"""
         # 1. Проверяем точный кэш
-        if query in self.exact_cache:
-            return {'type': 'exact', 'sql': self.exact_cache[query]}
+        if user_query in self.exact_cache:
+            self.stats['exact_hits'] += 1
+            return self.exact_cache[user_query]
         
-        # 2. Если есть известные слова - ищем по битам
-        if known_words:
-            mask = self._bits_to_mask(bits)
+        # 2. Если есть LLM и разрешено - используем её
+        if use_llm and self.llm:
+            print(f"DEBUG: Иду в LLM для запроса: {user_query}")
+            self.stats['llm_calls'] += 1
+            logger.info(f"Запрос к LLM: {user_query[:50]}...")
             
-            for pattern_mask_str, data in self.bit_combos.items():
-                # КОНВЕРТИРУЕМ pattern_mask в int если нужно
-                try:
-                    if isinstance(pattern_mask_str, str):
-                        pattern_mask = int(pattern_mask_str)
-                    else:
-                        pattern_mask = pattern_mask_str
-                except (ValueError, TypeError):
-                    continue  # Пропускаем некорректные
-                
-                common = mask & pattern_mask
-                if bin(common).count('1') >= max(2, len(known_words) // 2):
-                    return {'type': 'bit_pattern', 'data': data, 'mask': mask}
-        
-        # 3. Fallback по хешу
-        pattern_hash = self._create_pattern_hash(query)
-        if pattern_hash in self.fallback_patterns:
-            return {'type': 'fallback', 'data': self.fallback_patterns[pattern_hash]}
-        
-        return None
-    
-    # ===== ОСНОВНОЙ МЕТОД =====
-    
-    def build_sql(self, user_query: str, use_llm: bool = True) -> str:
-        """
-        Строит SQL для запроса
-        
-        Args:
-            user_query: запрос на естественном языке
-            use_llm: использовать LLM если не найден паттерн
-            
-        Returns:
-            SQL запрос
-        """
-        logger.info(f"Обработка: {user_query}")
-        
-        # 1. Ищем совпадение
-        match = self.find_best_match(user_query)
-        
-        if match:
-            if match['type'] == 'exact':
-                return match['sql']
-            
-            elif match['type'] == 'bit_pattern':
-                data = match['data']
-                sql = self._fill_template(data['template'], user_query)
-                data['count'] += 1
-                self.exact_cache[user_query] = sql
-                return sql
-            
-            elif match['type'] == 'fallback':
-                data = match['data']
-                sql = self._fill_template(data['template'], user_query)
-                data['count'] += 1
-                self.exact_cache[user_query] = sql
-                return sql
-        
-        # 2. LLM fallback
-        if use_llm and self.llm_client:
             try:
-                from .llm_fallback import LLMResult
-                llm_result = self.llm_client.ask(user_query)
-                
-                if llm_result and llm_result.is_safe:
-                    sql = llm_result.sql
-                    
-                    # Учимся на этом
-                    self.learn_from_example(user_query, sql, 'llm')
-                    
+                result = await self.llm.ask(user_query)
+                if result and result.sql:
+                    sql = result.sql
+                    # Учимся на ответе LLM
+                    words = self._extract_words(user_query)
+                    self._learn_from_example(user_query, sql, words, 'llm')
+                    self.exact_cache[user_query] = sql
+                    self._save_all_data()
                     return sql
-                    
             except Exception as e:
                 logger.error(f"Ошибка LLM: {e}")
         
-        # 3. Ultimate fallback
+        # 3. Ищем похожий паттерн
+        words = self._extract_words(user_query)
+        pattern = self._find_pattern(words)
+        
+        if pattern:
+            self.stats['pattern_hits'] += 1
+            sql = self._fill_template(pattern['template'], user_query)
+            
+            # Если шаблон заполнен - сохраняем в кэш
+            if '{' not in sql:
+                self.exact_cache[user_query] = sql
+                pattern['count'] += 1
+                self._save_cache()
+                return sql
+        
+        # 4. Fallback
         return "SELECT COUNT(*) FROM videos"
     
+    def _extract_words(self, query: str) -> Set[str]:
+        """Извлекаем нормализованные слова"""
+        query_lower = query.lower()
+        clean = query_lower.replace('?', ' ').replace('.', ' ').replace(',', ' ')
+        
+        # Удаляем числа и даты
+        clean = re.sub(r'\d{4}-\d{2}-\d{2}', ' ', clean)
+        clean = re.sub(r'\d{1,2}\s+\w+\s+\d{4}', ' ', clean)
+        clean = re.sub(r'\d+', ' ', clean)
+        
+        # Разбиваем на слова
+        all_words = clean.split()
+        
+        # Фильтруем
+        filtered = set()
+        for word in all_words:
+            if word in self.stop_words:
+                continue
+            if len(word) < 3:
+                continue
+            filtered.add(word)
+        
+        return filtered
+    
+    def _find_pattern(self, words: Set[str]) -> Optional[Dict]:
+        """Ищет похожий паттерн"""
+        if not words:
+            return None
+        
+        best_pattern = None
+        best_score = 0
+        
+        for pattern_hash, pattern in self.patterns.items():
+            pattern_words = set(pattern['words'])
+            
+            # Если все слова шаблона есть в запросе
+            if pattern_words.issubset(words):
+                common = len(words.intersection(pattern_words))
+                total_in_pattern = len(pattern_words)
+                coverage = common / total_in_pattern if total_in_pattern > 0 else 0
+                
+                if coverage >= 0.8:
+                    score = coverage + (0.1 if common == total_in_pattern else 0)
+                    if score > best_score:
+                        best_score = score
+                        best_pattern = pattern
+        
+        return best_pattern
+    
     def _fill_template(self, template: str, query: str) -> str:
-        """Заполнение шаблона"""
+        """Заполняет шаблон параметрами"""
         sql = template
+        query_lower = query.lower()
         
-        # Извлекаем значения
-        numbers = re.findall(r'\b\d+\b', query)
-        dates = re.findall(r'\d{4}-\d{2}-\d{2}', query)
-        uuids = re.findall(r'[a-f0-9-]{36}', query)
-        
-        # Русские даты
-        rus_match = re.search(r'(\d{1,2})\s+(\w+)\s+(\d{4})', query)
-        if rus_match:
-            day, month_ru, year = rus_match.groups()
+        # Даты
+        dates = []
+        date_matches = re.findall(r'(\d{1,2})\s+(\w+)\s+(\d{4})', query_lower)
+        for day, month_ru, year in date_matches:
             month_num = self._rus_month_to_num(month_ru)
             if month_num:
                 sql_date = f"{year}-{month_num:02d}-{int(day):02d}"
-                sql = sql.replace('{DATE}', sql_date)
+                dates.append(sql_date)
         
-        # Замена плейсхолдеров
-        if uuids and '{ID}' in sql:
-            sql = sql.replace('{ID}', uuids[0])
-        if dates and '{DATE}' in sql:
-            sql = sql.replace('{DATE}', dates[0])
-        if numbers and '{N}' in sql:
-            sql = sql.replace('{N}', numbers[0])
+        # SQL даты
+        sql_dates = re.findall(r'\d{4}-\d{2}-\d{2}', query)
+        dates.extend(sql_dates)
+        
+        # Заменяем DATE плейсхолдеры
+        if dates:
+            if len(dates) >= 2 and '{DATE1}' in sql and '{DATE2}' in sql:
+                sql = sql.replace('{DATE1}', dates[0]).replace('{DATE2}', dates[1])
+            elif len(dates) >= 1 and '{DATE}' in sql:
+                sql = sql.replace('{DATE}', dates[0])
+        
+        # Числа
+        numbers = re.findall(r'\d+', query)
+        if numbers and '{NUMBER}' in sql:
+            sql = sql.replace('{NUMBER}', max(numbers, key=int))
+        
+        # ID
+        id_match = re.search(r'(?:креатор[ауе]?\s+с\s+)?id\s+([\w-]+)', query_lower, re.IGNORECASE)
+        if id_match and '{ID}' in sql:
+            sql = sql.replace('{ID}', id_match.group(1))
         
         return sql
     
     def _rus_month_to_num(self, month_ru: str) -> Optional[int]:
-        """Конвертация русского месяца"""
+        """Конвертирует русский месяц в число"""
         month_map = {
             'января': 1, 'февраля': 2, 'марта': 3, 'апреля': 4,
             'мая': 5, 'июня': 6, 'июля': 7, 'августа': 8,
-            'сентября': 9, 'октября': 10, 'ноября': 11, 'декабря': 12
+            'сентября': 9, 'октября': 10, 'ноября': 11, 'декабря': 12,
+            'январь': 1, 'февраль': 2, 'март': 3, 'апрель': 4,
+            'май': 5, 'июнь': 6, 'июль': 7, 'август': 8,
+            'сентябрь': 9, 'октябрь': 10, 'ноябрь': 11, 'декабрь': 12
         }
         return month_map.get(month_ru.lower())
     
-    # ===== СОХРАНЕНИЕ/ЗАГРУЗКА =====
+    # ===================== ОБУЧЕНИЕ =====================
+    
+    def _learn_from_example(self, query: str, sql: str, words: Set[str], source: str = 'manual'):
+        """Сохраняет новый паттерн"""
+        if not words:
+            return
+        
+        # Создаём шаблон
+        template = self._generalize_sql(sql)
+        
+        # Создаём ключ паттерна
+        pattern_key = self._make_pattern_key(words)
+        
+        # Сохраняем паттерн
+        if pattern_key in self.patterns:
+            self.patterns[pattern_key]['count'] += 1
+            self.patterns[pattern_key]['examples'].append(query)
+        else:
+            self.patterns[pattern_key] = {
+                'words': list(words),
+                'template': template,
+                'count': 1,
+                'examples': [query],
+                'source': source,
+                'created_at': datetime.now().isoformat()
+            }
+            
+            for word in words:
+                self.word_index[word].add(pattern_key)
+            
+            self.stats['new_patterns'] += 1
+    
+    def _generalize_sql(self, sql: str) -> str:
+        """Создаёт шаблон из конкретного SQL"""
+        template = sql
+        
+        # Даты
+        template = re.sub(r"'(\d{4}-\d{2}-\d{2})'", "'{DATE}'", template)
+        
+        # Числа
+        template = re.sub(r'([<>]=?|=)\s*\d+', r'\1 {NUMBER}', template)
+        
+        # ID
+        template = re.sub(r"'([\w-]{15,}|\w{5,})'", "'{ID}'", template)
+        
+        return template
+    
+    def _make_pattern_key(self, words: Set[str]) -> str:
+        """Создаёт ключ паттерна"""
+        sorted_words = sorted(words)
+        return hashlib.md5(" ".join(sorted_words).encode()).hexdigest()[:16]
+    
+    # ===================== СОХРАНЕНИЕ/ЗАГРУЗКА =====================
     
     def _load_data(self):
-        """Загрузка данных"""
+        """Загружает сохранённые данные"""
         try:
-            if self.cache_file.exists():
-                with open(self.cache_file, 'r', encoding='utf-8') as f:
+            cache_file = Path("query_cache.json")
+            if cache_file.exists():
+                with open(cache_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self.exact_cache = data.get('exact_cache', {})
-                    self.fallback_patterns = data.get('fallback_patterns', {})
             
-            if self.patterns_file.exists():
-                with open(self.patterns_file, 'r', encoding='utf-8') as f:
+            patterns_file = Path("learned_patterns.json")
+            if patterns_file.exists():
+                with open(patterns_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    self.word_to_bit = data.get('word_to_bit', {})
-                    self.bit_combos = data.get('bit_combos', {})
+                    patterns_data = data.get('patterns', {})
                     
-                    # Восстанавливаем bit_counter
-                    max_bit = max(self.word_to_bit.values()) if self.word_to_bit else 0
-                    self.bit_counter = 1
-                    while self.bit_counter <= max_bit:
-                        self.bit_counter <<= 1
-                        
+                    self.patterns.clear()
+                    self.word_index.clear()
+                    
+                    for pattern_key, pattern in patterns_data.items():
+                        self.patterns[pattern_key] = pattern
+                        for word in pattern.get('words', []):
+                            self.word_index[word].add(pattern_key)
+                    
+                    logger.info(f"Загружено {len(self.patterns)} паттернов")
+                    
         except Exception as e:
             logger.error(f"Ошибка загрузки: {e}")
     
-    def _save_data(self):
-        """Сохранение данных"""
+    def _save_cache(self):
+        """Сохраняет кэш"""
         try:
-            # Кэш
-            cache_data = {
+            data = {
                 'exact_cache': self.exact_cache,
-                'fallback_patterns': self.fallback_patterns,
                 'updated_at': datetime.now().isoformat()
             }
-            with open(self.cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, ensure_ascii=False, indent=2)
-            
-            # Паттерны
-            pattern_data = {
-                'word_to_bit': self.word_to_bit,
-                'bit_combos': self.bit_combos,
-                'updated_at': datetime.now().isoformat()
-            }
-            with open(self.patterns_file, 'w', encoding='utf-8') as f:
-                json.dump(pattern_data, f, ensure_ascii=False, indent=2)
-                
+            with open("query_cache.json", 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            logger.error(f"Ошибка сохранения: {e}")
+            logger.error(f"Ошибка сохранения кэша: {e}")
     
-    # ===== УТИЛИТЫ =====
+    def _save_all_data(self):
+        """Сохраняет все данные"""
+        try:
+            patterns_data = {}
+            for key, pattern in self.patterns.items():
+                patterns_data[key] = pattern
+            
+            data = {
+                'patterns': patterns_data,
+                'updated_at': datetime.now().isoformat()
+            }
+            
+            with open("learned_patterns.json", 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            self._save_cache()
+            
+        except Exception as e:
+            logger.error(f"Ошибка сохранения данных: {e}")
+    
+    # ===================== УТИЛИТЫ =====================
+    
+    def get_stats(self) -> ConstructorStats:
+        """Возвращает статистику"""
+        return ConstructorStats(
+            total_patterns=len(self.patterns),
+            exact_hits=self.stats['exact_hits'],
+            pattern_hits=self.stats['pattern_hits'],
+            llm_calls=self.stats['llm_calls']
+        )
     
     def add_manual_pattern(self, query: str, sql: str):
         """Ручное добавление паттерна"""
-        self.learn_from_example(query, sql, 'manual')
+        words = self._extract_words(query)
+        self._learn_from_example(query, sql, words, 'manual')
+        self.exact_cache[query] = sql
+        self._save_all_data()
+        logger.info(f"Добавлен ручной паттерн: {len(words)} слов")
     
     def clear_cache(self):
-        """Очистка кэша"""
+        """Очищает кэш"""
         self.exact_cache = {}
-        self._save_data()
-    
-    def get_stats(self) -> ConstructorStats:
-        """Статистика"""
-        if self.bit_combos:
-            most_used = max(self.bit_combos.values(), key=lambda x: x['count'])
-        else:
-            most_used = None
-        
-        return ConstructorStats(
-            total_words=len(self.word_to_bit),
-            total_patterns=len(self.bit_combos),
-            cache_size=len(self.exact_cache),
-            fallback_patterns=len(self.fallback_patterns),
-            most_used_pattern=most_used['words'] if most_used else None,
-            most_used_count=most_used['count'] if most_used else 0
-        )
-
-
-# Фабричная функция
-def create_constructor(llm_client=None, enable_llm=True):
-    """Создание конструктора"""
-    if enable_llm and llm_client is None:
-        try:
-            from .llm_fallback import LLMTeacher
-            llm_client = LLMTeacher()
-        except ImportError:
-            logger.warning("LLM недоступен")
-            llm_client = None
-    
-    return QueryConstructor(
-        cache_file="query_cache.json",
-        patterns_file="learned_patterns.json",
-        llm_client=llm_client
-    )
+        self._save_cache()
+        logger.info("Кэш очищен")

@@ -1,4 +1,20 @@
-echo "data/videos.json" > .gitignore
-echo "*.json" >> .gitignore  
-echo "__pycache__/" >> .gitignore
-echo ".env" >> .gitignore
+# .gitignore
+.env
+logs/
+*.log
+__pycache__/
+*.pyc
+query_cache.json
+learned_patterns.json
+*.db
+.DS_Store
+venv/
+.env.*
+!.env.example
+Data/videos.json
+cho "*.bat" 
+echo "test*.py" 
+echo "!tests/test*.py" 
+echo "debug_*.py" 
+echo "run.py" 
+echo "setup.bat" 

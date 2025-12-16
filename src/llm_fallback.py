@@ -1,21 +1,15 @@
-"""
-LLM интеграция для конструктора
-"""
-
 import aiohttp
 import re
 import logging
-from typing import Optional, List, Tuple
+from typing import Optional
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class LLMResult:
-    """Результат работы LLM"""
     sql: str
     confidence: float
-    extracted_keywords: List[str]  # Изменено!
     is_safe: bool
 
 class LLMTeacher:
@@ -27,64 +21,96 @@ class LLMTeacher:
         self.schema_info = self._get_schema_info()
     
     def _get_schema_info(self) -> str:
-        """Описание схемы"""
-        return """
-        База данных видео-аналитики:
-        
-        ТАБЛИЦА videos:
-        - id (UUID), creator_id (VARCHAR), video_created_at (TIMESTAMPTZ)
-        - views_count, likes_count, comments_count, reports_count (INTEGER)
-        
-        ТАБЛИЦА video_snapshots:
-        - id, video_id, created_at (TIMESTAMPTZ)
-        - views_count, likes_count, comments_count, reports_count
-        - delta_views_count, delta_likes_count, delta_comments_count, delta_reports_count
-        
-        ПРАВИЛА:
-        1. COUNT(*) для подсчёта
-        2. SUM() для суммирования  
-        3. WHERE для фильтров
-        4. DATE() для дат
-        5. Только SELECT запросы
-        """
+        return """Ты SQL генератор для видео-аналитики. ВОПРОС → SQL.
+
+    ТАБЛИЦЫ:
+    1. videos - финальная статистика по видео:
+    - id, creator_id, video_created_at
+    - views_count, likes_count, comments_count, reports_count
+
+    2. video_snapshots - почасовые замеры (для прироста):
+    - video_id, created_at
+    - views_count, likes_count, comments_count, reports_count (текущие)
+    - delta_views_count, delta_likes_count, delta_comments_count, delta_reports_count (прирост)
+
+    ВАЖНО:
+    - "сколько всего X" → COUNT(*)
+    - "сколько всего КРЕАТОРОВ" → COUNT(DISTINCT creator_id)
+    - "сумма X за дату" → SUM(delta_X_count) FROM video_snapshots WHERE DATE(created_at) = 'дата'
+    - "видео с X более N" → COUNT(*) FROM videos WHERE X_count > N
+    - Даты в формате 'YYYY-MM-DD'
+
+    Примеры:
+    В: "Сколько всего видео?" → SELECT COUNT(*) FROM videos
+    В: "Сколько всего креаторов?" → SELECT COUNT(DISTINCT creator_id) FROM videos
+    В: "Сумма просмотров за 29 ноября 2025" → SELECT SUM(delta_views_count) FROM video_snapshots WHERE DATE(created_at) = '2025-11-29'
+    В: "Видео с лайками более 5000" → SELECT COUNT(*) FROM videos WHERE likes_count > 5000
+    В: "На сколько комментариев выросли видео 28 ноября?" → SELECT SUM(delta_comments_count) FROM video_snapshots WHERE DATE(created_at) = '2025-11-28'
+
+    Теперь ответь:"""
     
     async def ask(self, user_query: str) -> Optional[LLMResult]:
-        """Запрос к LLM"""
+        print(f"DEBUG_LLM: Получен запрос: {user_query}")
         prompt = self._build_prompt(user_query)
+        print(f"DEBUG_LLM: Промпт (первые 300 символов): {prompt[:300]}...")
         
         try:
             response = await self._call_ollama(prompt)
+            print(f"DEBUG_LLM: Ответ OLLAMA (полный): {response}")
+            
             sql = self._extract_sql(response)
+            print(f"DEBUG_LLM: Извлеченный SQL: '{sql}'")
             
             if not sql:
+                print("DEBUG_LLM: _extract_sql вернул None!")
                 return None
             
             is_safe = self._validate_sql(sql)
-            if not is_safe:
-                return None
+            print(f"DEBUG_LLM: SQL безопасен: {is_safe}")
             
-            # Извлекаем ключевые слова для обучения конструктора
-            keywords = self._extract_keywords(user_query)
+            if not is_safe:
+                print("DEBUG_LLM: SQL не прошел валидацию безопасности")
+                return None
             
             return LLMResult(
                 sql=sql,
                 confidence=0.8,
-                extracted_keywords=keywords,  # Теперь ключевые слова!
                 is_safe=is_safe
             )
             
         except Exception as e:
-            logger.error(f"LLM error: {e}")
+            print(f"DEBUG_LLM: Исключение в ask: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def _build_prompt(self, query: str) -> str:
-        """Строим промпт"""
-        return f"""{self.schema_info}
+        return f"""<s>[INST] You are an SQL generator. Return ONLY SQL code.
 
-Запрос: "{query}"
-SQL запрос:"""
+    TABLES:
+    1. videos - video data: id, creator_id, video_created_at, views_count, likes_count, comments_count, reports_count
+    2. video_snapshots - metric changes: video_id, created_at, delta_views_count, delta_likes_count, delta_comments_count, delta_reports_count
+
+    RULES:
+    - Use videos table for video counts and creator queries
+    - Use video_snapshots for metric growth (delta_ fields)
+    - Dates must be in 2025 year format: '2025-11-29', '2025-11-28', etc.
+    - NO explanations, ONLY SQL
+
+    EXAMPLES:
+    Question: "How many videos?" → SELECT COUNT(*) FROM videos
+    Question: "Videos with likes > 5000" → SELECT COUNT(*) FROM videos WHERE likes_count > 5000
+    Question: "Sum of comments for November 29" → SELECT SUM(delta_comments_count) FROM video_snapshots WHERE DATE(created_at) = '2025-11-29'
+    Question: "Videos from creator X between dates" → SELECT COUNT(*) FROM videos WHERE creator_id = 'X' AND DATE(video_created_at) BETWEEN '2025-11-01' AND '2025-11-28'
+
+    IMPORTANT: All dates should be in 2025!
+
+    Question: "{query}" [/INST]
+    SELECT"""
+       
     
     async def _call_ollama(self, prompt: str) -> str:
+        print(f"DEBUG: вызываю {self.base_url}/api/generate")
         """Вызов OLLAMA"""
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -93,7 +119,8 @@ SQL запрос:"""
                     "model": self.model,
                     "prompt": prompt,
                     "stream": False,
-                    "options": {"temperature": 0.1}
+                    "options": {"temperature": 0.1},
+                    "num_predict": 500
                 },
                 timeout=30
             ) as resp:
@@ -104,63 +131,60 @@ SQL запрос:"""
                     raise Exception(f"API error: {resp.status}")
     
     def _extract_sql(self, response: str) -> Optional[str]:
-        """Извлечение SQL"""
+        """Извлечение SQL с очисткой форматирования"""
+        # Убираем кодные блоки
         response = response.replace('```sql', '').replace('```', '').strip()
         
+        # Убираем лишние переносы строк
         lines = []
-        in_sql = False
-        
         for line in response.split('\n'):
             line = line.strip()
-            if line.upper().startswith('SELECT'):
-                in_sql = True
-            if in_sql:
+            if line and not line.startswith('--'):  # Пропускаем пустые строки и комментарии
                 lines.append(line)
-            if line.endswith(';') and in_sql:
-                break
         
         sql = ' '.join(lines)
-        if sql and 'SELECT' in sql.upper() and 'FROM' in sql.upper():
+        
+        # Если SQL не начинается с SELECT, пробуем найти его
+        if 'SELECT' in sql.upper() and 'FROM' in sql.upper():
+            # Нормализуем пробелы
+            sql = ' '.join(sql.split())
             return sql
+        elif sql.upper().startswith('COUNT') or 'FROM' in sql.upper():
+            # Если ответ вроде "COUNT(*) FROM videos" - добавляем SELECT
+            return f"SELECT {sql}"
+        
         return None
     
     def _validate_sql(self, sql: str) -> bool:
-        """Проверка безопасности"""
-        dangerous = ["DROP", "DELETE", "UPDATE", "INSERT", 
-                    "ALTER", "TRUNCATE", "CREATE", "--", "/*"]
-        
+        """Проверка безопасности SQL"""
+        # Приводим к верхнему регистру для проверки
         sql_upper = sql.upper()
+        
+        # Список опасных команд
+        dangerous = ["DROP", "DELETE", "UPDATE", "INSERT", 
+                    "ALTER", "TRUNCATE",  "--", "/*"]
+        
+        # Проверяем наличие опасных команд
         for word in dangerous:
             if word in sql_upper:
+                print(f"DEBUG_VALIDATE: Обнаружена опасная команда '{word}' в SQL: {sql}")
                 return False
         
-        return "SELECT" in sql_upper and "FROM" in sql_upper
-    
-    def _extract_keywords(self, query: str) -> List[str]:
-        """
-        Извлекаем ключевые слова из запроса
-        для обучения конструктора
-        """
-        query_lower = query.lower()
-        keywords = []
+        # Проверяем, что это SELECT-запрос
+        # Ищем 'SELECT' и 'FROM' в любом регистре и в любой позиции
+        has_select = "SELECT" in sql_upper
+        has_from = "FROM" in sql_upper
         
-        # Слова, которые интересны конструктору
-        interesting_words = [
-            'сколько', 'сумма', 'среднее', 'максимум', 'минимум',
-            'видео', 'просмотр', 'лайк', 'комментарий', 'жалоба',
-            'креатор', 'больше', 'меньше', 'ноябрь', 'декабрь',
-            '2025', 'дата', 'всего', 'разных', 'новые'
-        ]
+        if not has_select or not has_from:
+            print(f"DEBUG_VALIDATE: Нет SELECT или FROM. SELECT: {has_select}, FROM: {has_from}, SQL: {sql}")
+            return False
         
-        for word in interesting_words:
-            if word in query_lower:
-                keywords.append(word)
+        # Дополнительная проверка: не должно быть подозрительных конструкций
+        suspicious = ["INFORMATION_SCHEMA", "PG_", "SYSTEM", "EXEC", "XP_"]
+        for word in suspicious:
+            if word in sql_upper:
+                print(f"DEBUG_VALIDATE: Подозрительное слово '{word}' в SQL: {sql}")
+                return False
         
-        # Также добавляем числа и даты
-        if re.search(r'\b\d+\b', query_lower):
-            keywords.append('[HAS_NUMBER]')
-        
-        if re.search(r'\d{4}-\d{2}-\d{2}', query_lower):
-            keywords.append('[HAS_DATE]')
-        
-        return keywords
+        print(f"DEBUG_VALIDATE: SQL прошел проверку: {sql}")
+        return True
