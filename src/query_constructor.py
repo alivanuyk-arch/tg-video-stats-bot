@@ -62,6 +62,8 @@ class QueryConstructor:
             ("Сколько видео у креатора с id abc123?", "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}'"),
             ("Сколько видео у креатора с id abc123 вышло с 1 по 5 ноября 2025?", "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND DATE(video_created_at) BETWEEN '{DATE1}' AND '{DATE2}'"),
             ("Сколько видео у креатора с id abc123 вышло с 1 ноября 2025 по 28 ноября 2025 включительно?", "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND DATE(video_created_at) BETWEEN '{DATE1}' AND '{DATE2}'"),
+            ("Сколько видео у креатора с id abc123 вышло с 1 ноября 2025 по 28 ноября 2025 включительно?", "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND DATE(video_created_at) BETWEEN '{DATE1}' AND '{DATE2}'"),
+            ("Какое суммарное количество просмотров набрали все видео, опубликованные в июне 2025 года?", "SELECT SUM(views_count) FROM videos WHERE EXTRACT(YEAR FROM video_created_at) = 2025 AND EXTRACT(MONTH FROM video_created_at) = 6"),
         ]
         
         for query, sql in tz_examples:
