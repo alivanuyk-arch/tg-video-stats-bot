@@ -62,10 +62,12 @@ class QueryConstructor:
             ("Сколько видео у креатора с id abc123?", "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}'"),
             ("Сколько видео у креатора с id abc123 вышло с 1 по 5 ноября 2025?", "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND DATE(video_created_at) BETWEEN '{DATE1}' AND '{DATE2}'"),
             ("Сколько видео у креатора с id abc123 вышло с 1 ноября 2025 по 28 ноября 2025 включительно?", "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND DATE(video_created_at) BETWEEN '{DATE1}' AND '{DATE2}'"),
-            ("Сколько видео у креатора с id abc123 вышло с 1 ноября 2025 по 28 ноября 2025 включительно?", "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND DATE(video_created_at) BETWEEN '{DATE1}' AND '{DATE2}'"),
             ("Какое суммарное количество просмотров набрали все видео, опубликованные в июне 2025 года?", "SELECT SUM(views_count) FROM videos WHERE EXTRACT(YEAR FROM video_created_at) = 2025 AND EXTRACT(MONTH FROM video_created_at) = 6"),
             ("На сколько просмотров суммарно выросли все видео креатора с id X в промежутке с 10:00 до 15:00 28 ноября 2025 года?",
-            "SELECT SUM(delta_views_count) FROM video_snapshots vs JOIN videos v ON vs.video_id = v.id WHERE v.creator_id = '{ID}' AND DATE(vs.created_at) = '{DATE}' AND EXTRACT(HOUR FROM vs.created_at) BETWEEN {HOUR1} AND {HOUR2}")
+            "SELECT SUM(delta_views_count) FROM video_snapshots vs JOIN videos v ON vs.video_id = v.id WHERE v.creator_id = '{ID}' AND DATE(vs.created_at) = '{DATE}' AND EXTRACT(HOUR FROM vs.created_at) BETWEEN {HOUR1} AND {HOUR2}"),
+            # НОВЫЙ ПАТТЕРН:
+            ("Сколько замеров статистики с отрицательным приростом просмотров?", 
+            "SELECT COUNT(*) FROM video_snapshots WHERE delta_views_count < 0")
         ]
         
         for query, sql in tz_examples:
@@ -77,16 +79,17 @@ class QueryConstructor:
     
     async def build_sql_async(self, user_query: str, use_llm: bool = True) -> str:
         """Асинхронная версия build_sql с LLM"""
+        print(f"DEBUG build_sql_async: Запрос: {user_query}")
+        
         # 1. Проверяем точный кэш
         if user_query in self.exact_cache:
+            print(f"DEBUG: Точное совпадение в кэше")
             self.stats['exact_hits'] += 1
             return self.exact_cache[user_query]
-        if 'с 10:00 до 15:00' in user_query and 'креатора с id' in user_query:
-            return "SELECT SUM(delta_views_count) FROM video_snapshots vs JOIN videos v ON vs.video_id = v.id WHERE v.creator_id = 'cd87be38b50b4fdd8342bb3c383f3c7d' AND DATE(vs.created_at) = '2025-11-28' AND EXTRACT(HOUR FROM vs.created_at) BETWEEN 10 AND 14"
         
         # 2. Если есть LLM и разрешено - используем её
         if use_llm and self.llm:
-            print(f"DEBUG: Иду в LLM для запроса: {user_query}")
+            print(f"DEBUG: Иду в LLM для запроса")
             self.stats['llm_calls'] += 1
             logger.info(f"Запрос к LLM: {user_query[:50]}...")
             
@@ -94,20 +97,27 @@ class QueryConstructor:
                 result = await self.llm.ask(user_query)
                 if result and result.sql:
                     sql = result.sql
+                    print(f"DEBUG: LLM вернул SQL: {sql}")
                     # Учимся на ответе LLM
                     words = self._extract_words(user_query)
                     self._learn_from_example(user_query, sql, words, 'llm')
                     self.exact_cache[user_query] = sql
                     self._save_all_data()
                     return sql
+                else:
+                    print(f"DEBUG: LLM не вернул результат")
             except Exception as e:
                 logger.error(f"Ошибка LLM: {e}")
+                print(f"DEBUG: Ошибка LLM: {e}")
         
         # 3. Ищем похожий паттерн
         words = self._extract_words(user_query)
+        print(f"DEBUG: Извлеченные слова: {words}")
+        
         pattern = self._find_pattern(words)
         
         if pattern:
+            print(f"DEBUG: Найден паттерн: {pattern['template']}")
             self.stats['pattern_hits'] += 1
             sql = self._fill_template(pattern['template'], user_query)
             
@@ -116,9 +126,12 @@ class QueryConstructor:
                 self.exact_cache[user_query] = sql
                 pattern['count'] += 1
                 self._save_cache()
-                return sql
+            return sql
+        else:
+            print(f"DEBUG: Паттерн не найден")
         
         # 4. Fallback
+        print(f"DEBUG: Использую fallback")
         return "SELECT COUNT(*) FROM videos"
     
     def _extract_words(self, query: str) -> Set[str]:
@@ -175,7 +188,10 @@ class QueryConstructor:
         sql = template
         query_lower = query.lower()
         
-        # Даты
+        # Извлекаем ВСЕ параметры сначала
+        params = {}
+        
+        # 1. Даты
         dates = []
         date_matches = re.findall(r'(\d{1,2})\s+(\w+)\s+(\d{4})', query_lower)
         for day, month_ru, year in date_matches:
@@ -187,29 +203,66 @@ class QueryConstructor:
         # SQL даты
         sql_dates = re.findall(r'\d{4}-\d{2}-\d{2}', query)
         dates.extend(sql_dates)
-
-        hour_match = re.search(r'с\s+(\d{1,2}):00\s+до\s+(\d{1,2}):00', query_lower)
-        if hour_match and '{HOUR1}' in sql and '{HOUR2}' in sql:
-            sql = sql.replace('{HOUR1}', hour_match.group(1))
-            sql = sql.replace('{HOUR2}', str(int(hour_match.group(2)) - 1))
-            
-        # Заменяем DATE плейсхолдеры
+        
+        # Сохраняем даты в params
         if dates:
-            if len(dates) >= 2 and '{DATE1}' in sql and '{DATE2}' in sql:
-                sql = sql.replace('{DATE1}', dates[0]).replace('{DATE2}', dates[1])
-            elif len(dates) >= 1 and '{DATE}' in sql:
-                sql = sql.replace('{DATE}', dates[0])
+            if len(dates) >= 2:
+                params['{DATE1}'] = dates[0]
+                params['{DATE2}'] = dates[1]
+            if len(dates) >= 1:
+                params['{DATE}'] = dates[0]
         
-        # Числа
+        # 2. Часы (улучшенная версия)
+        hour_patterns = [
+            r'с\s+(\d{1,2}):00\s+до\s+(\d{1,2}):00',
+            r'в\s+промежутке\s+с\s+(\d{1,2}):00\s+до\s+(\d{1,2}):00',
+            r'между\s+(\d{1,2}):00\s+и\s+(\d{1,2}):00'
+        ]
+        
+        hour_match = None
+        for pattern in hour_patterns:
+            hour_match = re.search(pattern, query_lower)
+            if hour_match:
+                break
+        
+        if hour_match:
+            try:
+                hour1 = hour_match.group(1)
+                hour2 = hour_match.group(2)
+                
+                # ИЗМЕНЕНИЕ: НЕ вычитаем 1, используем точные часы
+                # Для 10:00-15:00 → BETWEEN 10 AND 15
+                # Для 9:00-18:00 → BETWEEN 9 AND 18
+                
+                # Сохраняем все варианты плейсхолдеров часов
+                params['{HOUR1}'] = hour1
+                params['{HOUR2}'] = hour2
+                params['{HOUR_START}'] = hour1
+                params['{HOUR_END}'] = hour2
+                params['{START_HOUR}'] = hour1
+                params['{END_HOUR}'] = hour2
+            except (ValueError, IndexError) as e:
+                print(f"DEBUG: Ошибка обработки часов: {e}")
+        
+        # 3. Числа
         numbers = re.findall(r'\d+', query)
-        if numbers and '{NUMBER}' in sql:
-            sql = sql.replace('{NUMBER}', max(numbers, key=int))
+        if numbers:
+            try:
+                params['{NUMBER}'] = max(numbers, key=lambda x: int(x))
+            except ValueError:
+                pass
         
-        # ID
+        # 4. ID
         id_match = re.search(r'(?:креатор[ауе]?\s+с\s+)?id\s+([\w-]+)', query_lower, re.IGNORECASE)
-        if id_match and '{ID}' in sql:
-            sql = sql.replace('{ID}', id_match.group(1))
+        if id_match:
+            params['{ID}'] = id_match.group(1)
         
+        # 5. Заменяем ВСЕ плейсхолдеры в SQL
+        for placeholder, value in params.items():
+            if placeholder in sql:
+                sql = sql.replace(placeholder, value)
+        
+        print(f"DEBUG: FINAL SQL: {sql}")
         return sql
     
     def _rus_month_to_num(self, month_ru: str) -> Optional[int]:
@@ -260,6 +313,10 @@ class QueryConstructor:
         """Создаёт шаблон из конкретного SQL"""
         template = sql
         
+        # Заменяем MySQL функции на PostgreSQL
+        template = template.replace("DATE_FORMAT(created_at, '%Y-%m-%d')", "DATE(created_at)")
+        template = template.replace("HOUR(created_at)", "EXTRACT(HOUR FROM created_at)")
+        
         # Даты
         template = re.sub(r"'(\d{4}-\d{2}-\d{2})'", "'{DATE}'", template)
         
@@ -268,6 +325,9 @@ class QueryConstructor:
         
         # ID
         template = re.sub(r"'([\w-]{15,}|\w{5,})'", "'{ID}'", template)
+        
+        # Часы в BETWEEN
+        template = re.sub(r'BETWEEN\s+(\d+)\s+AND\s+(\d+)', r'BETWEEN {HOUR1} AND {HOUR2}', template)
         
         return template
     

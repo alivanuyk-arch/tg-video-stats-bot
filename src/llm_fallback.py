@@ -102,6 +102,13 @@ class LLMTeacher:
     Question: "Videos with likes > 5000" → SELECT COUNT(*) FROM videos WHERE likes_count > 5000
     Question: "Sum of comments for November 29" → SELECT SUM(delta_comments_count) FROM video_snapshots WHERE DATE(created_at) = '2025-11-29'
     Question: "Videos from creator X between dates" → SELECT COUNT(*) FROM videos WHERE creator_id = 'X' AND DATE(video_created_at) BETWEEN '2025-11-01' AND '2025-11-28'
+    Question: "Sum of views for creator X between hours" → 
+    SELECT SUM(delta_views_count) FROM video_snapshots vs 
+    JOIN videos v ON vs.video_id = v.id 
+    WHERE v.creator_id = 'X' AND DATE(vs.created_at) = '2025-11-28' 
+    AND EXTRACT(HOUR FROM vs.created_at) BETWEEN 10 AND 15
+    Question: "How many snapshots with negative view growth?" → 
+    SELECT COUNT(*) FROM video_snapshots WHERE delta_views_count < 0
 
     IMPORTANT: All dates should be in 2025!
 
