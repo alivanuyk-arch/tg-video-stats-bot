@@ -196,7 +196,7 @@ class QueryConstructor:
     
     
     def _find_pattern(self, words: Set[str]) -> Optional[Dict]:
-        """Ищет похожий паттерн - СТРОГАЯ ВЕРСИЯ"""
+        """Ищет похожий паттерн - с приоритетом ключевых комбинаций"""
         print(f"\nDEBUG _find_pattern: Начало поиска")
         print(f"Слова запроса: {words}")
         print(f"Всего паттернов: {len(self.patterns)}")
@@ -205,57 +205,70 @@ class QueryConstructor:
             print("DEBUG _find_pattern: Нет слов для поиска")
             return None
         
+        # 1. ПРОВЕРКА КЛЮЧЕВЫХ КОМБИНАЦИЙ (ВЫСОКИЙ ПРИОРИТЕТ)
+        key_combinations = [
+            # Отрицательные дельты - ВАЖНО!
+            ({'отрицательным', 'замеров', 'статистики'}, "negative_delta"),
+            # Часы + креатор
+            ({'промежутке', 'креатора', 'часов'}, "hours_creator"),
+            # Сумма просмотров
+            ({'суммарное', 'просмотров', 'количество'}, "sum_views"),
+            # Количество видео  
+            ({'сколько', 'видео', 'есть'}, "count_videos"),
+            # Креаторы
+            ({'сколько', 'креаторов'}, "count_creators"),
+        ]
+        
+        for keyword_set, pattern_type in key_combinations:
+            if keyword_set.issubset(words):
+                print(f"DEBUG: Найдена ключевая комбинация: {keyword_set} → {pattern_type}")
+                # Ищем паттерн по типу
+                for pattern_hash, pattern in self.patterns.items():
+                    template = pattern.get('template', '')
+                    if pattern_type == "negative_delta" and 'delta_views_count < 0' in template:
+                        print(f"DEBUG: Возвращаем паттерн для отрицательных дельт")
+                        return pattern
+                    elif pattern_type == "hours_creator" and 'EXTRACT(HOUR FROM' in template:
+                        print(f"DEBUG: Возвращаем паттерн с часами и креатором")
+                        return pattern
+                    elif pattern_type == "sum_views" and 'SUM(views_count)' in template:
+                        print(f"DEBUG: Возвращаем паттерн суммы просмотров")
+                        return pattern
+                    elif pattern_type == "count_videos" and 'COUNT(*) FROM videos' in template and 'WHERE' not in template:
+                        print(f"DEBUG: Возвращаем паттерн количества видео")
+                        return pattern
+                    elif pattern_type == "count_creators" and 'COUNT(DISTINCT creator_id)' in template:
+                        print(f"DEBUG: Возвращаем паттерн количества креаторов")
+                        return pattern
+        
+        # 2. СТАНДАРТНЫЙ ПОИСК
+        print(f"DEBUG: Стандартный поиск паттернов")
         best_pattern = None
         best_score = 0
         
         for pattern_hash, pattern in self.patterns.items():
             pattern_words = set(pattern['words'])
             
-            # 1. Должны совпадать КЛЮЧЕВЫЕ слова
-            key_words = {'креатора', 'креаторов', 'видео', 'просмотров', 'лайков', 'комментариев'}
-            pattern_key_words = pattern_words.intersection(key_words)
-            query_key_words = words.intersection(key_words)
-            
-            # Если ключевые слова не совпадают - пропускаем
-            if pattern_key_words != query_key_words:
-                continue
-            
-            # 2. Строгое покрытие
-            common = words.intersection(pattern_words)
-            coverage_query = len(common) / len(words) if words else 0
-            coverage_pattern = len(common) / len(pattern_words) if pattern_words else 0
-            
-            # ОЧЕНЬ СТРОГИЕ ТРЕБОВАНИЯ:
-            # - ≥85% слов запроса покрыто
-            # - ≥90% слов паттерна есть в запросе
-            # - Разница в количестве слов ≤ 2
-            word_count_diff = abs(len(words) - len(pattern_words))
-            
-            if (coverage_query >= 0.85 and 
-                coverage_pattern >= 0.90 and 
-                word_count_diff <= 2):
+            # Если все слова шаблона есть в запросе
+            if pattern_words.issubset(words):
+                common = words.intersection(pattern_words)
+                total_in_pattern = len(pattern_words)
+                coverage = len(common) / total_in_pattern if total_in_pattern > 0 else 0
                 
-                score = (coverage_query * 0.6) + (coverage_pattern * 0.4) - (word_count_diff * 0.05)
+                print(f"  Паттерн {pattern_hash[:8]}: покрытие {coverage:.2f}")
                 
-                print(f"\nПаттерн {pattern_hash} ПРОШЕЛ ФИЛЬТР:")
-                print(f"  Слова паттерна: {pattern_words}")
-                print(f"  Общие слова: {common}")
-                print(f"  Покрытие запроса: {coverage_query:.2f}")
-                print(f"  Покрытие паттерна: {coverage_pattern:.2f}")
-                print(f"  Разница слов: {word_count_diff}")
-                print(f"  Оценка: {score:.2f}")
-                
-                if score > best_score:
-                    best_score = score
-                    best_pattern = pattern
-                    print(f"  НОВЫЙ ЛУЧШИЙ ПАТТЕРН!")
+                if coverage >= 0.8:
+                    score = coverage + (0.1 if len(common) == total_in_pattern else 0)
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_pattern = pattern
+                        print(f"    Новый лучший: score={score:.2f}")
         
         if best_pattern:
-            print(f"\nDEBUG _find_pattern: Найден СТРОГО подходящий паттерн")
-            print(f"  Оценка: {best_score:.2f}")
-            print(f"  Шаблон: {best_pattern['template']}")
+            print(f"DEBUG: Найден лучший паттерн со score={best_score:.2f}")
         else:
-            print(f"\nDEBUG _find_pattern: СТРОГО подходящий паттерн не найден → LLM")
+            print(f"DEBUG: Подходящий паттерн не найден")
         
         return best_pattern
     
