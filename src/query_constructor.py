@@ -546,11 +546,16 @@ class QueryConstructor:
         template = template.replace("DATE_FORMAT(created_at, '%Y-%m-%d')", "DATE(created_at)")
         template = template.replace("HOUR(created_at)", "EXTRACT(HOUR FROM created_at)")
         
-        # Даты
+        # Даты в одинарных кавычках
         template = re.sub(r"'(\d{4}-\d{2}-\d{2})'", "'{DATE}'", template)
         
-        # ВАЖНОЕ ИСПРАВЛЕНИЕ: НЕ заменяем 0 в условиях negative delta
-        # Сохраняем delta_views_count < 0 и delta_views_count > 0 как есть
+        # ВАЖНОЕ ИСПРАВЛЕНИЕ: Разные плейсхолдеры для BETWEEN
+        # Находим все даты в шаблоне
+        dates = re.findall(r"'\{DATE\}'", template)
+        if len(dates) >= 2 and 'BETWEEN' in template:
+            # Заменяем первую дату на {DATE1}, вторую на {DATE2}
+            template = template.replace("'{DATE}'", "'{DATE1}'", 1)
+            template = template.replace("'{DATE}'", "'{DATE2}'", 1)
         
         # Год и месяц в EXTRACT
         if 'EXTRACT(YEAR FROM video_created_at)' in template:
@@ -561,10 +566,8 @@ class QueryConstructor:
             template = re.sub(r'EXTRACT\(MONTH FROM video_created_at\)\s*=\s*\d{1,2}', 
                             'EXTRACT(MONTH FROM video_created_at) = {MONTH}', template)
         
-        # Общие числа, но НЕ трогаем delta_views_count < 0 или > 0
-        # Используем более точное регулярное выражение
-        
-        # 1. Обрабатываем условия delta_views_count
+        # ВАЖНОЕ ИСПРАВЛЕНИЕ: НЕ заменяем 0 в условиях delta_views_count
+        # Сохраняем delta_views_count < 0 и delta_views_count > 0 как есть
         delta_patterns = [
             (r'delta_views_count\s*<\s*0', 'delta_views_count < 0'),
             (r'delta_views_count\s*>\s*0', 'delta_views_count > 0'),
@@ -575,14 +578,27 @@ class QueryConstructor:
         for pattern, replacement in delta_patterns:
             template = re.sub(pattern, replacement, template, flags=re.IGNORECASE)
         
-        # 2. Для остальных чисел делаем замену
-        # Сначала заменяем числа в условиях сравнения
-        template = re.sub(r'([<>]=?|=)\s*(\d+)', 
-                        lambda m: f'{m.group(1)} {self._check_delta_zero(m.group(2), template)}', 
-                        template)
+        # Общие числа, но пропускаем уже обработанные
+        # Находим все числа в условиях сравнения
+        def replace_number(match):
+            operator = match.group(1)
+            number = match.group(2)
+            
+            # Если это 0 в delta_views_count - уже обработали выше
+            if number == '0' and 'delta_views_count' in template:
+                return f'{operator} 0'
+            
+            # Если это число в EXTRACT условиях - оставляем как есть
+            if 'EXTRACT(YEAR' in template or 'EXTRACT(MONTH' in template:
+                return match.group(0)
+                
+            return f'{operator} {{NUMBER}}'
         
-        # ID
-        template = re.sub(r"'([\w-]{15,}|\w{5,})'", "'{ID}'", template)
+        template = re.sub(r'([<>]=?|=)\s*(\d+)', replace_number, template)
+        
+        # ID (креаторы, видео)
+        template = re.sub(r"'([a-f0-9]{32})'", "'{ID}'", template)  # 32 hex символа
+        template = re.sub(r"'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})'", "'{VIDEO_ID}'", template)
         
         # Часы в BETWEEN
         template = re.sub(r'BETWEEN\s+(\d+)\s+AND\s+(\d+)', r'BETWEEN {HOUR1} AND {HOUR2}', template)
@@ -592,6 +608,10 @@ class QueryConstructor:
                         r'EXTRACT(HOUR FROM vs.created_at) >= {HOUR1}', template)
         template = re.sub(r'EXTRACT\(HOUR FROM vs\.created_at\)\s*<\s*(\d+)', 
                         r'EXTRACT(HOUR FROM vs.created_at) < {HOUR2}', template)
+        
+        # Удаляем лишний текст после SQL (иногда LLM добавляет объяснения)
+        if ';' in template:
+            template = template.split(';')[0] + ';'
         
         print(f"Шаблон после обобщения: '{template}'")
         return template
