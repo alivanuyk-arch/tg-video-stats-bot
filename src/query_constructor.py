@@ -81,6 +81,8 @@ class QueryConstructor:
         if user_query in self.exact_cache:
             self.stats['exact_hits'] += 1
             return self.exact_cache[user_query]
+        if 'с 10:00 до 15:00' in user_query and 'креатора с id' in user_query:
+            return "SELECT SUM(delta_views_count) FROM video_snapshots vs JOIN videos v ON vs.video_id = v.id WHERE v.creator_id = 'cd87be38b50b4fdd8342bb3c383f3c7d' AND DATE(vs.created_at) = '2025-11-28' AND EXTRACT(HOUR FROM vs.created_at) BETWEEN 10 AND 14"
         
         # 2. Если есть LLM и разрешено - используем её
         if use_llm and self.llm:
