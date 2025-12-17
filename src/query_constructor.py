@@ -87,6 +87,8 @@ class QueryConstructor:
             ("Сколько замеров статистики с отрицательным приростом просмотров?", "SELECT COUNT(*) FROM video_snapshots WHERE delta_views_count < 0"),
              ("На сколько просмотров суммарно выросли все видео креатора с id X в промежутке с 10:00 до 15:00 28 ноября 2025 года?",
              "SELECT SUM(delta_views_count) FROM video_snapshots vs JOIN videos v ON vs.video_id = v.id WHERE v.creator_id = '{ID}' AND DATE(vs.created_at) = '{DATE}' AND EXTRACT(HOUR FROM vs.created_at) >= {HOUR1} AND EXTRACT(HOUR FROM vs.created_at) < {HOUR2}"),
+            ("Сколько всего есть замеров статистики (по всем видео), в которых число просмотров за час оказалось отрицательным — то есть по сравнению с предыдущим замером количество просмотров стало меньше?",
+             "SELECT COUNT(*) FROM video_snapshots WHERE delta_views_count < 0"),
         ]
         
         for query, sql in tz_examples:
@@ -280,7 +282,28 @@ class QueryConstructor:
             
             sql = template
             query_lower = query.lower()
+
+                    # ДОБАВЛЯЕМ: Проверяем на "отрицательный"
+            has_negative = any(word in query_lower for word in [
+                'отрицательным', 'отрицательный', 'отрицательных', 
+                'меньше', 'уменьшилось', 'уменьшились'
+            ])
             
+            has_positive = any(word in query_lower for word in [
+                'положительным', 'положительный', 'положительных',
+                'больше', 'увеличилось', 'увеличились'
+            ])
+            
+            # Если запрос про отрицательные значения
+            if has_negative and 'delta_views_count < {NUMBER}' in sql:
+                sql = sql.replace('delta_views_count < {NUMBER}', 'delta_views_count < 0')
+                print(f"  Обнаружено 'отрицательный' → заменяем на < 0")
+            
+            # Если запрос про положительные значения  
+            if has_positive and 'delta_views_count > {NUMBER}' in sql:
+                sql = sql.replace('delta_views_count > {NUMBER}', 'delta_views_count > 0')
+                print(f"  Обнаружено 'положительный' → заменяем на > 0")
+
             # Извлекаем ВСЕ параметры
             params = {}
             
@@ -513,45 +536,79 @@ class QueryConstructor:
             self.stats['new_patterns'] += 1
     
     def _generalize_sql(self, sql: str) -> str:
-            """Создаёт шаблон из конкретного SQL"""
-            print(f"\nDEBUG _generalize_sql: Создание шаблона")
-            print(f"Исходный SQL: '{sql}'")
-            
-            template = sql
-            
-            # Заменяем MySQL функции на PostgreSQL
-            template = template.replace("DATE_FORMAT(created_at, '%Y-%m-%d')", "DATE(created_at)")
-            template = template.replace("HOUR(created_at)", "EXTRACT(HOUR FROM created_at)")
-            
-            # Даты
-            template = re.sub(r"'(\d{4}-\d{2}-\d{2})'", "'{DATE}'", template)
-            
-            # Числа (но сохраняем 2025 и 6 как {YEAR} и {MONTH} для специфических случаев)
-            if 'EXTRACT(YEAR FROM video_created_at)' in template:
-                template = re.sub(r'EXTRACT\(YEAR FROM video_created_at\)\s*=\s*\d{4}', 
-                                'EXTRACT(YEAR FROM video_created_at) = {YEAR}', template)
-            
-            if 'EXTRACT(MONTH FROM video_created_at)' in template:
-                template = re.sub(r'EXTRACT\(MONTH FROM video_created_at\)\s*=\s*\d{1,2}', 
-                                'EXTRACT(MONTH FROM video_created_at) = {MONTH}', template)
-            
-            # Общие числа
-            template = re.sub(r'([<>]=?|=)\s*\d+', r'\1 {NUMBER}', template)
-            
-            # ID
-            template = re.sub(r"'([\w-]{15,}|\w{5,})'", "'{ID}'", template)
-            
-            # Часы в BETWEEN
-            template = re.sub(r'BETWEEN\s+(\d+)\s+AND\s+(\d+)', r'BETWEEN {HOUR1} AND {HOUR2}', template)
-            
-            # Часы в >= и < условиях
-            template = re.sub(r'EXTRACT\(HOUR FROM vs\.created_at\)\s*>=\s*(\d+)', 
-                            r'EXTRACT(HOUR FROM vs.created_at) >= {HOUR1}', template)
-            template = re.sub(r'EXTRACT\(HOUR FROM vs\.created_at\)\s*<\s*(\d+)', 
-                            r'EXTRACT(HOUR FROM vs.created_at) < {HOUR2}', template)
-            
-            print(f"Шаблон после обобщения: '{template}'")
-            return template
+        """Создаёт шаблон из конкретного SQL"""
+        print(f"\nDEBUG _generalize_sql: Создание шаблона")
+        print(f"Исходный SQL: '{sql}'")
+        
+        template = sql
+        
+        # Заменяем MySQL функции на PostgreSQL
+        template = template.replace("DATE_FORMAT(created_at, '%Y-%m-%d')", "DATE(created_at)")
+        template = template.replace("HOUR(created_at)", "EXTRACT(HOUR FROM created_at)")
+        
+        # Даты
+        template = re.sub(r"'(\d{4}-\d{2}-\d{2})'", "'{DATE}'", template)
+        
+        # ВАЖНОЕ ИСПРАВЛЕНИЕ: НЕ заменяем 0 в условиях negative delta
+        # Сохраняем delta_views_count < 0 и delta_views_count > 0 как есть
+        
+        # Год и месяц в EXTRACT
+        if 'EXTRACT(YEAR FROM video_created_at)' in template:
+            template = re.sub(r'EXTRACT\(YEAR FROM video_created_at\)\s*=\s*\d{4}', 
+                            'EXTRACT(YEAR FROM video_created_at) = {YEAR}', template)
+        
+        if 'EXTRACT(MONTH FROM video_created_at)' in template:
+            template = re.sub(r'EXTRACT\(MONTH FROM video_created_at\)\s*=\s*\d{1,2}', 
+                            'EXTRACT(MONTH FROM video_created_at) = {MONTH}', template)
+        
+        # Общие числа, но НЕ трогаем delta_views_count < 0 или > 0
+        # Используем более точное регулярное выражение
+        
+        # 1. Обрабатываем условия delta_views_count
+        delta_patterns = [
+            (r'delta_views_count\s*<\s*0', 'delta_views_count < 0'),
+            (r'delta_views_count\s*>\s*0', 'delta_views_count > 0'),
+            (r'delta_views_count\s*<=\s*0', 'delta_views_count <= 0'),
+            (r'delta_views_count\s*>=\s*0', 'delta_views_count >= 0'),
+        ]
+        
+        for pattern, replacement in delta_patterns:
+            template = re.sub(pattern, replacement, template, flags=re.IGNORECASE)
+        
+        # 2. Для остальных чисел делаем замену
+        # Сначала заменяем числа в условиях сравнения
+        template = re.sub(r'([<>]=?|=)\s*(\d+)', 
+                        lambda m: f'{m.group(1)} {self._check_delta_zero(m.group(2), template)}', 
+                        template)
+        
+        # ID
+        template = re.sub(r"'([\w-]{15,}|\w{5,})'", "'{ID}'", template)
+        
+        # Часы в BETWEEN
+        template = re.sub(r'BETWEEN\s+(\d+)\s+AND\s+(\d+)', r'BETWEEN {HOUR1} AND {HOUR2}', template)
+        
+        # Часы в >= и < условиях
+        template = re.sub(r'EXTRACT\(HOUR FROM vs\.created_at\)\s*>=\s*(\d+)', 
+                        r'EXTRACT(HOUR FROM vs.created_at) >= {HOUR1}', template)
+        template = re.sub(r'EXTRACT\(HOUR FROM vs\.created_at\)\s*<\s*(\d+)', 
+                        r'EXTRACT(HOUR FROM vs.created_at) < {HOUR2}', template)
+        
+        print(f"Шаблон после обобщения: '{template}'")
+        return template
+    
+    def _check_delta_zero(self, number: str, template: str) -> str:
+        """Проверяет, является ли это 0 в условии delta_views_count"""
+        # Если это 0 и в шаблоне есть delta_views_count, оставляем 0
+        if number == '0' and 'delta_views_count' in template.lower():
+            return '0'
+        return '{NUMBER}'
+
+    def _check_delta_zero(self, number: str, template: str) -> str:
+        """Проверяет, является ли это 0 в условии delta_views_count"""
+        # Если это 0 и в шаблоне есть delta_views_count, оставляем 0
+        if number == '0' and 'delta_views_count' in template.lower():
+            return '0'
+        return '{NUMBER}'
     
     def _make_pattern_key(self, words: Set[str]) -> str:
         """Создаёт ключ паттерна"""

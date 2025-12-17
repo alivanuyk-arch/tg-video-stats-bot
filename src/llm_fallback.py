@@ -65,6 +65,11 @@ class LLMTeacher:
         - Dates: '2025-11-28' format
         - NO placeholders like {{NUMBER}} or {{DATE}} - use actual values or omit
         - If no specific date/year mentioned, don't filter by date
+         - Negative delta means: delta_views_count < 0
+        - Positive delta means: delta_views_count > 0
+        - NEVER use {{NUMBER}} placeholder
+        - For negative growth: use delta_views_count < 0
+        - For positive growth: use delta_views_count > 0
 
         TABLES:
         1. videos: id, creator_id, video_created_at, views_count, likes_count, comments_count, reports_count
