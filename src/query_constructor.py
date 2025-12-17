@@ -64,6 +64,8 @@ class QueryConstructor:
             ("Сколько видео у креатора с id abc123 вышло с 1 ноября 2025 по 28 ноября 2025 включительно?", "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND DATE(video_created_at) BETWEEN '{DATE1}' AND '{DATE2}'"),
             ("Сколько видео у креатора с id abc123 вышло с 1 ноября 2025 по 28 ноября 2025 включительно?", "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND DATE(video_created_at) BETWEEN '{DATE1}' AND '{DATE2}'"),
             ("Какое суммарное количество просмотров набрали все видео, опубликованные в июне 2025 года?", "SELECT SUM(views_count) FROM videos WHERE EXTRACT(YEAR FROM video_created_at) = 2025 AND EXTRACT(MONTH FROM video_created_at) = 6"),
+            ("На сколько просмотров суммарно выросли все видео креатора с id X в промежутке с 10:00 до 15:00 28 ноября 2025 года?",
+            "SELECT SUM(delta_views_count) FROM video_snapshots vs JOIN videos v ON vs.video_id = v.id WHERE v.creator_id = '{ID}' AND DATE(vs.created_at) = '{DATE}' AND EXTRACT(HOUR FROM vs.created_at) BETWEEN {HOUR1} AND {HOUR2}")
         ]
         
         for query, sql in tz_examples:
@@ -183,7 +185,12 @@ class QueryConstructor:
         # SQL даты
         sql_dates = re.findall(r'\d{4}-\d{2}-\d{2}', query)
         dates.extend(sql_dates)
-        
+
+        hour_match = re.search(r'с\s+(\d{1,2}):00\s+до\s+(\d{1,2}):00', query_lower)
+        if hour_match and '{HOUR1}' in sql and '{HOUR2}' in sql:
+            sql = sql.replace('{HOUR1}', hour_match.group(1))
+            sql = sql.replace('{HOUR2}', str(int(hour_match.group(2)) - 1))
+            
         # Заменяем DATE плейсхолдеры
         if dates:
             if len(dates) >= 2 and '{DATE1}' in sql and '{DATE2}' in sql:
