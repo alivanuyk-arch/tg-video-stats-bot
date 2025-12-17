@@ -18,45 +18,16 @@ class LLMTeacher:
     def __init__(self, model: str = "llama3.2:3b", base_url: str = "http://localhost:11434"):
         self.model = model
         self.base_url = base_url
-        self.schema_info = self._get_schema_info()
-    
-    def _get_schema_info(self) -> str:
-        return """Ты SQL генератор для видео-аналитики. ВОПРОС → SQL.
-
-    ТАБЛИЦЫ:
-    1. videos - финальная статистика по видео:
-    - id, creator_id, video_created_at
-    - views_count, likes_count, comments_count, reports_count
-
-    2. video_snapshots - почасовые замеры (для прироста):
-    - video_id, created_at
-    - views_count, likes_count, comments_count, reports_count (текущие)
-    - delta_views_count, delta_likes_count, delta_comments_count, delta_reports_count (прирост)
-
-    ВАЖНО:
-    - "сколько всего X" → COUNT(*)
-    - "сколько всего КРЕАТОРОВ" → COUNT(DISTINCT creator_id)
-    - "сумма X за дату" → SUM(delta_X_count) FROM video_snapshots WHERE DATE(created_at) = 'дата'
-    - "видео с X более N" → COUNT(*) FROM videos WHERE X_count > N
-    - Даты в формате 'YYYY-MM-DD'
-
-    Примеры:
-    В: "Сколько всего видео?" → SELECT COUNT(*) FROM videos
-    В: "Сколько всего креаторов?" → SELECT COUNT(DISTINCT creator_id) FROM videos
-    В: "Сумма просмотров за 29 ноября 2025" → SELECT SUM(delta_views_count) FROM video_snapshots WHERE DATE(created_at) = '2025-11-29'
-    В: "Видео с лайками более 5000" → SELECT COUNT(*) FROM videos WHERE likes_count > 5000
-    В: "На сколько комментариев выросли видео 28 ноября?" → SELECT SUM(delta_comments_count) FROM video_snapshots WHERE DATE(created_at) = '2025-11-28'
-
-    Теперь ответь:"""
     
     async def ask(self, user_query: str) -> Optional[LLMResult]:
-        print(f"DEBUG_LLM: Получен запрос: {user_query}")
+        print(f"\n{'='*60}")
+        print(f"DEBUG_LLM: Получен запрос: '{user_query}'")
         prompt = self._build_prompt(user_query)
         print(f"DEBUG_LLM: Промпт (первые 300 символов): {prompt[:300]}...")
         
         try:
             response = await self._call_ollama(prompt)
-            print(f"DEBUG_LLM: Ответ OLLAMA (полный): {response}")
+            print(f"DEBUG_LLM: Ответ OLLAMA (первые 500 символов):\n{response[:500]}...")
             
             sql = self._extract_sql(response)
             print(f"DEBUG_LLM: Извлеченный SQL: '{sql}'")
@@ -87,38 +58,31 @@ class LLMTeacher:
     def _build_prompt(self, query: str) -> str:
         return f"""<s>[INST] You are an SQL generator. Return ONLY SQL code.
 
-    TABLES:
-    1. videos - video data: id, creator_id, video_created_at, views_count, likes_count, comments_count, reports_count
-    2. video_snapshots - metric changes: video_id, created_at, delta_views_count, delta_likes_count, delta_comments_count, delta_reports_count
+        CRITICAL RULES:
+        - NEVER nest aggregate functions (NO SUM(SUM(...)), NO COUNT(COUNT(...)))
+        - Use simple aggregates: SUM(column), COUNT(*), AVG(column)
+        - NO YEAR() function in PostgreSQL, use EXTRACT(YEAR FROM column)
+        - Dates: '2025-11-28' format
+        - NO placeholders like {{NUMBER}} or {{DATE}} - use actual values or omit
+        - If no specific date/year mentioned, don't filter by date
 
-    RULES:
-    - Use videos table for video counts and creator queries
-    - Use video_snapshots for metric growth (delta_ fields)
-    - Dates must be in 2025 year format: '2025-11-29', '2025-11-28', etc.
-    - NO explanations, ONLY SQL
+        TABLES:
+        1. videos: id, creator_id, video_created_at, views_count, likes_count, comments_count, reports_count
+        2. video_snapshots: video_id, created_at, delta_views_count, delta_likes_count, delta_comments_count, delta_reports_count
 
-    EXAMPLES:
-    Question: "How many videos?" → SELECT COUNT(*) FROM videos
-    Question: "Videos with likes > 5000" → SELECT COUNT(*) FROM videos WHERE likes_count > 5000
-    Question: "Sum of comments for November 29" → SELECT SUM(delta_comments_count) FROM video_snapshots WHERE DATE(created_at) = '2025-11-29'
-    Question: "Videos from creator X between dates" → SELECT COUNT(*) FROM videos WHERE creator_id = 'X' AND DATE(video_created_at) BETWEEN '2025-11-01' AND '2025-11-28'
-    Question: "Sum of views for creator X between hours" → 
-    SELECT SUM(delta_views_count) FROM video_snapshots vs 
-    JOIN videos v ON vs.video_id = v.id 
-    WHERE v.creator_id = 'X' AND DATE(vs.created_at) = '2025-11-28' 
-    AND EXTRACT(HOUR FROM vs.created_at) BETWEEN 10 AND 15
-    Question: "How many snapshots with negative view growth?" → 
-    SELECT COUNT(*) FROM video_snapshots WHERE delta_views_count < 0
+        SIMPLE EXAMPLES:
+        Question: "How many videos?" → SELECT COUNT(*) FROM videos
+        Question: "Total views" → SELECT SUM(views_count) FROM videos
+        Question: "Total views for all creators" → SELECT SUM(views_count) FROM videos
+        Question: "How many creators?" → SELECT COUNT(DISTINCT creator_id) FROM videos
+        Question: "Views for creator X" → SELECT SUM(views_count) FROM videos WHERE creator_id = 'X'
+        Question: "Growth of views on November 28" → SELECT SUM(delta_views_count) FROM video_snapshots WHERE DATE(created_at) = '2025-11-28'
 
-    IMPORTANT: All dates should be in 2025!
-
-    Question: "{query}" [/INST]
-    SELECT"""
-       
+        Question: "{query}" [/INST]
+        SELECT"""
     
     async def _call_ollama(self, prompt: str) -> str:
-        print(f"DEBUG: вызываю {self.base_url}/api/generate")
-        """Вызов OLLAMA"""
+        print(f"\nDEBUG_LLM: Вызываю {self.base_url}/api/generate")
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{self.base_url}/api/generate",
@@ -133,12 +97,20 @@ class LLMTeacher:
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return data.get('response', '')
+                    response_text = data.get('response', '')
+                    print(f"DEBUG_LLM: Статус ответа: {resp.status}")
+                    print(f"DEBUG_LLM: Длина ответа: {len(response_text)} символов")
+                    return response_text
                 else:
-                    raise Exception(f"API error: {resp.status}")
+                    error_text = await resp.text()
+                    print(f"DEBUG_LLM: Ошибка API: {resp.status} - {error_text}")
+                    raise Exception(f"API error: {resp.status} - {error_text}")
     
     def _extract_sql(self, response: str) -> Optional[str]:
         """Извлечение SQL с очисткой форматирования"""
+        print(f"DEBUG_LLM _extract_sql: Начало обработки ответа LLM")
+        print(f"Исходный ответ (первые 200 символов): {response[:200]}")
+        
         # Убираем кодные блоки
         response = response.replace('```sql', '').replace('```', '').strip()
         
@@ -150,20 +122,40 @@ class LLMTeacher:
                 lines.append(line)
         
         sql = ' '.join(lines)
+        print(f"DEBUG_LLM _extract_sql: После очистки: '{sql}'")
+        
+        # Удаляем оставшиеся плейсхолдеры
+        import re
+        sql = re.sub(r'\{[A-Z_]+\}', '', sql)
+        print(f"DEBUG_LLM _extract_sql: После удаления плейсхолдеров: '{sql}'")
+        
+        # Проверка на вложенные агрегаты
+        if re.search(r'SUM\(.*SUM\(', sql, re.IGNORECASE) or \
+           re.search(r'COUNT\(.*COUNT\(', sql, re.IGNORECASE) or \
+           re.search(r'AVG\(.*AVG\(', sql, re.IGNORECASE):
+            print(f"DEBUG_LLM _extract_sql: Ошибка: вложенные агрегатные функции")
+            return None
         
         # Если SQL не начинается с SELECT, пробуем найти его
         if 'SELECT' in sql.upper() and 'FROM' in sql.upper():
             # Нормализуем пробелы
             sql = ' '.join(sql.split())
+            print(f"DEBUG_LLM _extract_sql: Найден SELECT, возвращаем: '{sql}'")
             return sql
         elif sql.upper().startswith('COUNT') or 'FROM' in sql.upper():
             # Если ответ вроде "COUNT(*) FROM videos" - добавляем SELECT
-            return f"SELECT {sql}"
+            result = f"SELECT {sql}"
+            print(f"DEBUG_LLM _extract_sql: Добавлен SELECT: '{result}'")
+            return result
         
+        print(f"DEBUG_LLM _extract_sql: Не удалось извлечь SQL")
         return None
     
     def _validate_sql(self, sql: str) -> bool:
         """Проверка безопасности SQL"""
+        print(f"\nDEBUG_VALIDATE: Начало проверки безопасности")
+        print(f"SQL для проверки: '{sql}'")
+        
         # Приводим к верхнему регистру для проверки
         sql_upper = sql.upper()
         
@@ -174,24 +166,33 @@ class LLMTeacher:
         # Проверяем наличие опасных команд
         for word in dangerous:
             if word in sql_upper:
-                print(f"DEBUG_VALIDATE: Обнаружена опасная команда '{word}' в SQL: {sql}")
+                print(f"DEBUG_VALIDATE: Обнаружена опасная команда '{word}' в SQL")
                 return False
         
         # Проверяем, что это SELECT-запрос
-        # Ищем 'SELECT' и 'FROM' в любом регистре и в любой позиции
         has_select = "SELECT" in sql_upper
         has_from = "FROM" in sql_upper
         
+        print(f"DEBUG_VALIDATE: SELECT: {has_select}, FROM: {has_from}")
+        
         if not has_select or not has_from:
-            print(f"DEBUG_VALIDATE: Нет SELECT или FROM. SELECT: {has_select}, FROM: {has_from}, SQL: {sql}")
+            print(f"DEBUG_VALIDATE: Нет SELECT или FROM")
             return False
         
         # Дополнительная проверка: не должно быть подозрительных конструкций
         suspicious = ["INFORMATION_SCHEMA", "PG_", "SYSTEM", "EXEC", "XP_"]
         for word in suspicious:
             if word in sql_upper:
-                print(f"DEBUG_VALIDATE: Подозрительное слово '{word}' в SQL: {sql}")
+                print(f"DEBUG_VALIDATE: Подозрительное слово '{word}'")
                 return False
         
-        print(f"DEBUG_VALIDATE: SQL прошел проверку: {sql}")
+        # Проверка на вложенные агрегаты
+        import re
+        if re.search(r'SUM\(.*SUM\(', sql_upper) or \
+           re.search(r'COUNT\(.*COUNT\(', sql_upper) or \
+           re.search(r'AVG\(.*AVG\(', sql_upper):
+            print(f"DEBUG_VALIDATE: Ошибка: вложенные агрегатные функции")
+            return False
+        
+        print(f"DEBUG_VALIDATE: SQL прошел проверку безопасности")
         return True
