@@ -60,9 +60,10 @@ class SimpleBot:
         
         logger.info(f"Запрос от {user_id}: {user_query}")
         
-        if not self.llm:
-            await update.message.reply_text("LLM отключен в настройках")
-            return
+        # УБЕРИ эту проверку - LLM всегда инициализирован принудительно
+        # if not self.llm:
+        #     await update.message.reply_text("LLM отключен в настройках")
+        #     return
         
         await update.message.reply_chat_action(action="typing")
         
@@ -98,8 +99,8 @@ class SimpleBot:
         
         logger.info("Бот запускается (LLM режим)...")
         
-        # Пропускаем проверку БД на старте
-        # await self.db.connect()
+        # Подключаем БД
+        await self.db.connect()
         
         # Запуск
         await self.application.initialize()

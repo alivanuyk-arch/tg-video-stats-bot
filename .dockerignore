@@ -1,0 +1,41 @@
+# .dockerignore
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env
+.venv
+
+# Testing
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Data
+data/videos.json  # Исключаем большой JSON из образа
+
+# Кэши
+query_cache.json
+learned_patterns.json
+
+# Документация
+docs/_build/

@@ -48,47 +48,35 @@ class QueryConstructor:
         self._load_data()
         
         # Предзагрузка примеров ТЗ
-        self._init_tz_patterns()
+        self._init_tz_patterns()  # ← ЭТОТ МЕТОД ВЫЗЫВАЕТСЯ
         
         logger.info(f"Конструктор инициализирован. Паттернов: {len(self.patterns)}")
     
-    def _init_tz_patterns(self):
+    def _init_tz_patterns(self):  # ← ДОБАВЬ ЭТОТ МЕТОД!
         """Предзагрузка примеров из ТЗ"""
         tz_examples = [
-            ("Сколько всего видео есть в системе?", 
-             "SELECT COUNT(*) FROM videos"),
-            
-            ("Сколько видео набрало больше 100000 просмотров?", 
-             "SELECT COUNT(*) FROM videos WHERE views_count > {NUMBER}"),
-            
-            ("На сколько просмотров выросли все видео 28 ноября 2025?", 
-             "SELECT SUM(delta_views_count) FROM video_snapshots WHERE DATE(created_at) = '{DATE}'"),
-            
-            ("Сколько разных видео получали новые просмотры 27 ноября 2025?", 
-             "SELECT COUNT(DISTINCT video_id) FROM video_snapshots WHERE DATE(created_at) = '{DATE}' AND delta_views_count > 0"),
-            
-            ("Сколько видео у креатора с id abc123?", 
-             "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}'"),
-            
-            ("Сколько видео у креатора с id abc123 вышло с 1 по 5 ноября 2025?", 
-             "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND DATE(video_created_at) BETWEEN '{DATE1}' AND '{DATE2}'"),
-            
-            ("Сколько видео у креатора с id abc123 вышло с 1 ноября 2025 по 28 ноября 2025 включительно?", 
-             "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND DATE(video_created_at) BETWEEN '{DATE1}' AND '{DATE2}'"),
-            ("Какое суммарное количество просмотров набрали все видео, опубликованные в июне 2025 года?", 
-             "SELECT SUM(views_count) FROM videos WHERE EXTRACT(YEAR FROM video_created_at) = {YEAR} AND EXTRACT(MONTH FROM video_created_at) = {MONTH}"),
-            
-            # Альтернативный вариант:
-            ("Какое суммарное количество просмотров набрали все видео, опубликованные в июне 2025 года?", 
-             "SELECT SUM(views_count) FROM videos WHERE EXTRACT(YEAR FROM video_created_at) = 2025 AND EXTRACT(MONTH FROM video_created_at) = 6"),
-            ("На сколько просмотров суммарно выросли все видео креатора с id X в промежутке с 10:00 до 15:00 28 ноября 2025 года?",
-             "SELECT SUM(delta_views_count) FROM video_snapshots vs JOIN videos v ON vs.video_id = v.id WHERE v.creator_id = '{ID}' AND DATE(vs.created_at) = '{DATE}' AND EXTRACT(HOUR FROM vs.created_at) >= {HOUR1} AND EXTRACT(HOUR FROM vs.created_at) < {HOUR2}"),
-            
-            ("Сколько замеров статистики с отрицательным приростом просмотров?", "SELECT COUNT(*) FROM video_snapshots WHERE delta_views_count < 0"),
-             ("На сколько просмотров суммарно выросли все видео креатора с id X в промежутке с 10:00 до 15:00 28 ноября 2025 года?",
-             "SELECT SUM(delta_views_count) FROM video_snapshots vs JOIN videos v ON vs.video_id = v.id WHERE v.creator_id = '{ID}' AND DATE(vs.created_at) = '{DATE}' AND EXTRACT(HOUR FROM vs.created_at) >= {HOUR1} AND EXTRACT(HOUR FROM vs.created_at) < {HOUR2}"),
-            ("Сколько всего есть замеров статистики (по всем видео), в которых число просмотров за час оказалось отрицательным — то есть по сравнению с предыдущим замером количество просмотров стало меньше?",
-             "SELECT COUNT(*) FROM video_snapshots WHERE delta_views_count < 0"),
+        #("Сколько всего видео есть в системе?", 
+       # "SELECT COUNT(*) FROM videos"),
+        #("видео креатора с по ноября", 
+       # "SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND DATE(video_created_at) BETWEEN '{DATE1}' AND '{DATE2}'"),
+        #("Сколько видео набрало больше 100000 просмотров?", 
+       # "SELECT COUNT(*) FROM videos WHERE views_count > {NUMBER}"),
+        
+        # Отрицательные дельты
+       # ("Сколько замеров статистики с отрицательным приростом просмотров?", 
+        #"SELECT COUNT(*) FROM video_snapshots WHERE delta_views_count < 0"),
+        
+        # Сумма просмотров за месяц
+       # ("Какое суммарное количество просмотров набрали все видео, опубликованные в июне 2025 года?", 
+        #"SELECT SUM(views_count) FROM videos WHERE EXTRACT(YEAR FROM video_created_at) = {YEAR} AND EXTRACT(MONTH FROM video_created_at) = {MONTH}"),
+        
+        # РАЗНЫЕ ДНИ (ГЛАВНЫЙ ПАТТЕРН!)
+        #("Для креатора с id X посчитай разные дни ноября", 
+        #"SELECT COUNT(DISTINCT DATE(video_created_at)) FROM videos WHERE creator_id = '{ID}' AND EXTRACT(YEAR FROM video_created_at) = {YEAR} AND EXTRACT(MONTH FROM video_created_at) = {MONTH}"),
+        
+        # Креатор с просмотрами > N
+       # ("Сколько видео у креатора с id X набрали больше N просмотров", 
+        #"SELECT COUNT(*) FROM videos WHERE creator_id = '{ID}' AND views_count > {NUMBER}"),
         ]
         
         for query, sql in tz_examples:
@@ -207,43 +195,43 @@ class QueryConstructor:
             print("DEBUG _find_pattern: Нет слов для поиска")
             return None
         
-        # 1. ПРОВЕРКА КЛЮЧЕВЫХ КОМБИНАЦИЙ (ВЫСОКИЙ ПРИОРИТЕТ)
-        key_combinations = [
-            # Отрицательные дельты - ВАЖНО!
-            ({'отрицательным', 'замеров', 'статистики'}, "negative_delta"),
-            # Часы + креатор
-            ({'промежутке', 'креатора', 'часов'}, "hours_creator"),
-            # Сумма просмотров
-            ({'суммарное', 'просмотров', 'количество'}, "sum_views"),
-            # Количество видео  
-            ({'сколько', 'видео', 'есть'}, "count_videos"),
-            # Креаторы
-            ({'сколько', 'креаторов'}, "count_creators"),
-        ]
+        # ВАЖНОЕ ИСПРАВЛЕНИЕ: Проверяем наличие критических слов
+        has_creator = any(word in words for word in ['IDCREATOR', 'креатора', 'креатор'])
+        has_hours = any(word in words for word in ['промежутке', 'часов', 'часа', '10', '15'])
+        has_date = any(word in words for word in ['ноября', 'декабря', 'января', 'дата'])
         
-        for keyword_set, pattern_type in key_combinations:
-            if keyword_set.issubset(words):
-                print(f"DEBUG: Найдена ключевая комбинация: {keyword_set} → {pattern_type}")
-                # Ищем паттерн по типу
-                for pattern_hash, pattern in self.patterns.items():
-                    template = pattern.get('template', '')
-                    if pattern_type == "negative_delta" and 'delta_views_count < 0' in template:
-                        print(f"DEBUG: Возвращаем паттерн для отрицательных дельт")
-                        return pattern
-                    elif pattern_type == "hours_creator" and 'EXTRACT(HOUR FROM' in template:
-                        print(f"DEBUG: Возвращаем паттерн с часами и креатором")
-                        return pattern
-                    elif pattern_type == "sum_views" and 'SUM(views_count)' in template:
-                        print(f"DEBUG: Возвращаем паттерн суммы просмотров")
-                        return pattern
-                    elif pattern_type == "count_videos" and 'COUNT(*) FROM videos' in template and 'WHERE' not in template:
-                        print(f"DEBUG: Возвращаем паттерн количества видео")
-                        return pattern
-                    elif pattern_type == "count_creators" and 'COUNT(DISTINCT creator_id)' in template:
-                        print(f"DEBUG: Возвращаем паттерн количества креаторов")
-                        return pattern
+        print(f"DEBUG: Критические слова - креатор: {has_creator}, часы: {has_hours}, дата: {has_date}")
         
-        # 2. СТАНДАРТНЫЙ ПОИСК
+        # 1. Ищем паттерн с креатором И часами И датой
+        if has_creator and has_hours and has_date:
+            print("DEBUG: Ищем паттерн с креатором+часами+датой")
+            for pattern_hash, pattern in self.patterns.items():
+                template = pattern.get('template', '')
+                pattern_words = set(pattern['words'])
+                
+                if 'креатора' in pattern_words and 'промежутке' in pattern_words:
+                    print(f"DEBUG: Найден паттерн с креатором и промежутком: {pattern_hash[:8]}")
+                    return pattern
+        
+        # 2. Ищем паттерн с креатором И датой
+        if has_creator and has_date:
+            print("DEBUG: Ищем паттерн с креатором+датой")
+            for pattern_hash, pattern in self.patterns.items():
+                pattern_words = set(pattern['words'])
+                if 'креатора' in pattern_words and not 'промежутке' in pattern_words:
+                    print(f"DEBUG: Найден паттерн с креатором: {pattern_hash[:8]}")
+                    return pattern
+        
+        # 3. Ищем паттерн с часами И датой
+        if has_hours and has_date:
+            print("DEBUG: Ищем паттерн с часами+датой")
+            for pattern_hash, pattern in self.patterns.items():
+                pattern_words = set(pattern['words'])
+                if 'промежутке' in pattern_words:
+                    print(f"DEBUG: Найден паттерн с часами: {pattern_hash[:8]}")
+                    return pattern
+        
+        # 4. Стандартный поиск (старая логика)
         print(f"DEBUG: Стандартный поиск паттернов")
         best_pattern = None
         best_score = 0
@@ -259,7 +247,7 @@ class QueryConstructor:
                 
                 print(f"  Паттерн {pattern_hash[:8]}: покрытие {coverage:.2f}")
                 
-                if coverage >= 0.8:
+                if coverage >= 0.9:
                     score = coverage + (0.1 if len(common) == total_in_pattern else 0)
                     
                     if score > best_score:
@@ -274,240 +262,190 @@ class QueryConstructor:
         
         return best_pattern
     
+    
     def _fill_template(self, template: str, query: str) -> str:
-            """Заполняет шаблон параметрами"""
-            print(f"\nDEBUG _fill_template: Начало")
-            print(f"Шаблон: '{template}'")
-            print(f"Запрос: '{query}'")
-            
-            sql = template
-            query_lower = query.lower()
-
-                    # ДОБАВЛЯЕМ: Проверяем на "отрицательный"
-            has_negative = any(word in query_lower for word in [
-                'отрицательным', 'отрицательный', 'отрицательных', 
-                'меньше', 'уменьшилось', 'уменьшились'
-            ])
-            
-            has_positive = any(word in query_lower for word in [
-                'положительным', 'положительный', 'положительных',
-                'больше', 'увеличилось', 'увеличились'
-            ])
-            
-            # Если запрос про отрицательные значения
-            if has_negative and 'delta_views_count < {NUMBER}' in sql:
-                sql = sql.replace('delta_views_count < {NUMBER}', 'delta_views_count < 0')
-                print(f"  Обнаружено 'отрицательный' → заменяем на < 0")
-            
-            # Если запрос про положительные значения  
-            if has_positive and 'delta_views_count > {NUMBER}' in sql:
-                sql = sql.replace('delta_views_count > {NUMBER}', 'delta_views_count > 0')
-                print(f"  Обнаружено 'положительный' → заменяем на > 0")
-
-            # Извлекаем ВСЕ параметры
-            params = {}
-            
-            # 1. Даты
-            dates = []
-            
+        """Заполняет шаблон параметрами"""
+        print(f"\nDEBUG _fill_template: Начало")
+        print(f"Шаблон: '{template}'")
+        print(f"Запрос: '{query}'")
+        
+        sql = template
+        query_lower = query.lower()
+        
+        # Извлекаем ВСЕ параметры
+        params = {}
+        dates = []
+        found_range = False
+        
+        # ==================== 1. МЕСЯЦ И ГОД ИЗ ТЕКСТА ====================
+        # Паттерн: "в ноябре 2025 года" или "ноября 2025 года"
+        month_year_patterns = [
+            r'в\s+(\w+)\s+(\d{4})\s+года',      # в ноябре 2025 года
+            r'в\s+(\w+)\s+(\d{4})',             # в ноябре 2025
+            r'за\s+(\w+)\s+(\d{4})',            # за ноябрь 2025
+            r'(\w+)\s+(\d{4})\s+года',          # ноября 2025 года
+            r'(\w+)\s+(\d{4})',                 # ноября 2025
+            r'опубликованные\s+в\s+(\w+)\s+(\d{4})',
+        ]
+        
+        for pattern in month_year_patterns:
+            match = re.search(pattern, query_lower)
+            if match:
+                month_ru = match.group(1)
+                year = match.group(2)
+                month_num = self._rus_month_to_num(month_ru)
+                
+                if month_num:
+                    params['{YEAR}'] = year
+                    params['{MONTH}'] = str(month_num)
+                    print(f"  Найден месяц и год: {month_ru} {year} -> месяц={month_num}")
+                    break  # Нашли - выходим
+        
+        # ==================== 2. ДИАПАЗОНЫ ДАТ ====================
+        date_range_patterns = [
+            r'с\s+(\d{1,2})\s+(\w+)\s+(\d{4})\s+по\s+(\d{1,2})\s+(\w+)\s+(\d{4})',
+            r'с\s+(\d{1,2})\s+(\w+)\s+(\d{4})\s+до\s+(\d{1,2})\s+(\w+)\s+(\d{4})',
+            r'от\s+(\d{1,2})\s+(\w+)\s+(\d{4})\s+до\s+(\d{1,2})\s+(\w+)\s+(\d{4})',
+            r'(\d{1,2})\s+(\w+)\s+(\d{4})\s+по\s+(\d{1,2})\s+(\w+)\s+(\d{4})',
+            r'(\d{1,2})\s+(\w+)\s+(\d{4})\s+-\s+(\d{1,2})\s+(\w+)\s+(\d{4})',
+            r'(\d{1,2})\s+(\w+)\s+(\d{4})\s+до\s+(\d{1,2})\s+(\w+)\s+(\d{4})',
+        ]
+        
+        for pattern in date_range_patterns:
+            match = re.search(pattern, query_lower)
+            if match and len(match.groups()) == 6:
+                day1, month1_ru, year1, day2, month2_ru, year2 = match.groups()
+                month1_num = self._rus_month_to_num(month1_ru)
+                month2_num = self._rus_month_to_num(month2_ru)
+                
+                if month1_num and month2_num:
+                    date1 = f"{year1}-{month1_num:02d}-{int(day1):02d}"
+                    date2 = f"{year2}-{month2_num:02d}-{int(day2):02d}"
+                    
+                    params['{DATE1}'] = date1
+                    params['{DATE2}'] = date2
+                    dates.extend([date1, date2])
+                    print(f"  Найден диапазон дат: {date1} - {date2}")
+                    found_range = True
+                    break
+        
+        # ==================== 3. ОТДЕЛЬНЫЕ ДАТЫ ====================
+        if not found_range:
             # Паттерн: "28 ноября 2025"
             date_matches = re.findall(r'(\d{1,2})\s+(\w+)\s+(\d{4})', query_lower)
-            
             for day, month_ru, year in date_matches:
                 month_num = self._rus_month_to_num(month_ru)
                 if month_num:
                     sql_date = f"{year}-{month_num:02d}-{int(day):02d}"
                     dates.append(sql_date)
-            
-            # SQL даты: "2025-11-28"
-            sql_dates = re.findall(r'\d{4}-\d{2}-\d{2}', query)
-            dates.extend(sql_dates)
-            
-            # Сохраняем даты в params
-            if dates:
-                if len(dates) >= 2:
-                    params['{DATE1}'] = dates[0]
-                    params['{DATE2}'] = dates[1]
-                if len(dates) >= 1:
-                    params['{DATE}'] = dates[0]
-            
-            # 2. Часы
-            hour_patterns = [
-                r'с\s+(\d{1,2}):00\s+до\s+(\d{1,2}):00',
-                r'в\s+промежутке\s+с\s+(\d{1,2}):00\s+до\s+(\d{1,2}):00',
-                r'между\s+(\d{1,2}):00\s+и\s+(\d{1,2}):00',
-                r'(\d{1,2}):00\s*-\s*(\d{1,2}):00',
-                r'(\d{1,2})\s+до\s+(\d{1,2})'
+                    print(f"  Найдена дата: {sql_date}")
+        
+        # SQL даты: "2025-11-28"
+        sql_dates = re.findall(r'\d{4}-\d{2}-\d{2}', query)
+        dates.extend(sql_dates)
+        
+        # Сохраняем даты в params
+        if dates:
+            if len(dates) >= 2:
+                params['{DATE1}'] = dates[0]
+                params['{DATE2}'] = dates[1]
+            if len(dates) >= 1:
+                params['{DATE}'] = dates[0]
+        
+        # ==================== 4. ЧИСЛА ====================
+        numbers = re.findall(r'\b\d+\b', query)
+        filtered_numbers = []
+        for num in numbers:
+            if dates and any(num in date for date in dates):
+                continue
+            filtered_numbers.append(num)
+        
+        if filtered_numbers:
+            print(f"  Найдены числа: {filtered_numbers}")
+            for i, num in enumerate(filtered_numbers, 1):
+                params[f'{{NUMBER{i}}}'] = num
+            params['{NUMBER}'] = filtered_numbers[0]
+        
+        # ==================== 5. ID КРЕАТОРА ====================
+        creator_id_match = re.search(r'креатор[ауе]?\s+(?:с\s+)?id\s+([a-f0-9]{32})', query_lower)
+        if creator_id_match:
+            params['{ID}'] = creator_id_match.group(1)
+            print(f"  Найден ID креатора: {creator_id_match.group(1)}")
+        else:
+            id_patterns = [
+                r'id\s+([a-f0-9]{32})',
+                r'креатора\s+([a-f0-9]{32})',
             ]
-            
-            hour_match = None
-            for pattern in hour_patterns:
-                hour_match = re.search(pattern, query_lower)
-                if hour_match:
+            for pattern in id_patterns:
+                id_match = re.search(pattern, query_lower)
+                if id_match:
+                    params['{ID}'] = id_match.group(1)
+                    print(f"  Найден ID: {id_match.group(1)}")
                     break
-            
-            if hour_match:
-                try:
-                    hour1 = hour_match.group(1)
-                    hour2 = hour_match.group(2)
-                    
-                    # Для BETWEEN используем hour1 и hour2-1
-                    params['{HOUR1}'] = hour1
-                    params['{HOUR2}'] = hour2
-                    
-                    # Для условий >= и < используем как есть
-                    params['{START_HOUR}'] = hour1
-                    params['{END_HOUR}'] = hour2
-                    
-                except (ValueError, IndexError) as e:
-                    print(f"  Ошибка обработки часов: {e}")
-            
-            # 3. Числа - ВАЖНОЕ ИСПРАВЛЕНИЕ: находим ВСЕ числа
-            numbers = re.findall(r'\b\d+\b', query)
-            
-            if numbers:
-                print(f"  Найдены числа: {numbers}")
-                
-                # Сохраняем все числа для последовательной замены
-                # Если чисел больше чем нужно - используем первое и второе
-                if len(numbers) >= 2:
-                    # Первое число (скорее всего год)
-                    params['{YEAR}'] = numbers[0]
-                    # Второе число (или что-то другое)
-                    params['{NUMBER2}'] = numbers[1]
-                
-                # Для простых {NUMBER} используем все найденные числа
-                # Критическая часть: если есть месяц в тексте, заменяем его номером
-                month_match = re.search(r'в\s+(\w+)\s+(\d{4})', query_lower)
-                if month_match:
-                    month_ru = month_match.group(1)
-                    year = month_match.group(2)
-                    month_num = self._rus_month_to_num(month_ru)
-                    if month_num:
-                        params['{YEAR}'] = year
-                        params['{MONTH}'] = str(month_num)
-                        print(f"  Обнаружен месяц и год: {month_ru} {year} -> месяц={month_num}")
-            
-               
-            # 4. ВАЖНОЕ ИСПРАВЛЕНИЕ: поиск ID креатора (32 hex символа)
-            creator_id_match = re.search(r'креатор[ауе]?\s+(?:с\s+)?id\s+([a-f0-9]{32})', query_lower)
-            if creator_id_match:
-                params['{ID}'] = creator_id_match.group(1)
-                print(f"  Найден ID креатора: {creator_id_match.group(1)}")
+        
+        # ==================== 6. ЗАМЕНА ПЛЕЙСХОЛДЕРОВ ====================
+        print(f"\nDEBUG _fill_template: Умная замена плейсхолдеров...")
+        print(f"DEBUG: params перед заменой: {params}")
+        print(f"DEBUG: SQL перед заменой: '{sql}'")
+        
+        # 6.1. Сначала специальные плейсхолдеры
+        special_placeholders = ['{YEAR}', '{MONTH}', '{DATE1}', '{DATE2}']
+        for placeholder in special_placeholders:
+            if placeholder in sql:
+                print(f"DEBUG: Проверяю {placeholder} -> в params: {placeholder in params}")
+                if placeholder in params:
+                    sql = sql.replace(placeholder, params[placeholder])
+                    print(f"  Заменен {placeholder} -> {params[placeholder]}")
+                else:
+                    print(f"  ВНИМАНИЕ: {placeholder} в SQL, но нет в params!")
+        
+        # 6.2. {NUMBER1}, {NUMBER2} и т.д.
+        for placeholder, value in params.items():
+            if placeholder.startswith('{NUMBER') and placeholder in sql:
+                sql = sql.replace(placeholder, value)
+                print(f"  Заменен {placeholder} -> {value}")
+        
+        # 6.3. Остальные плейсхолдеры
+        for placeholder, value in params.items():
+            if placeholder in sql and placeholder not in special_placeholders and not placeholder.startswith('{NUMBER'):
+                sql = sql.replace(placeholder, value)
+                print(f"  Заменен {placeholder} -> {value}")
+        
+        # 6.4. Остались {NUMBER} - заменяем первым числом
+        while '{NUMBER}' in sql:
+            if filtered_numbers:
+                sql = sql.replace('{NUMBER}', filtered_numbers[0], 1)
+                print(f"  Заменен {{NUMBER}} -> {filtered_numbers[0]}")
             else:
-                # Альтернативные паттерны
-                id_patterns = [
-                    r'id\s+([a-f0-9]{32})',
-                    r'креатора\s+([a-f0-9]{32})',
-                ]
-                
-                for pattern in id_patterns:
-                    id_match = re.search(pattern, query_lower)
-                    if id_match:
-                        params['{ID}'] = id_match.group(1)
-                        print(f"  Найден ID: {id_match.group(1)}")
-                        break
-            
-            # 5. УМНАЯ ЗАМЕНА ПЛЕЙСХОЛДЕРОВ
-            print(f"\nDEBUG _fill_template: Умная замена плейсхолдеров...")
-            original_sql = sql
-            
-            # 5.1. Сначала заменяем специальные плейсхолдеры
-            if '{YEAR}' in sql and '{YEAR}' in params:
-                sql = sql.replace('{YEAR}', params['{YEAR}'])
-                print(f"  Заменен {{YEAR}} -> {params['{YEAR}']}")
-            
-            if '{MONTH}' in sql and '{MONTH}' in params:
-                sql = sql.replace('{MONTH}', params['{MONTH}'])
-                print(f"  Заменен {{MONTH}} -> {params['{MONTH}']}")
-            
-            if '{NUMBER2}' in sql and '{NUMBER2}' in params:
-                sql = sql.replace('{NUMBER2}', params['{NUMBER2}'])
-                print(f"  Заменен {{NUMBER2}} -> {params['{NUMBER2}']}")
-            
-            # 5.2. Последовательная замена {NUMBER} разными числами из запроса
-            if '{NUMBER}' in sql and numbers:
-                # Подсчитываем сколько {NUMBER} в SQL
-                num_placeholders = sql.count('{NUMBER}')
-                
-                if num_placeholders == 1:
-                    # Если только один плейсхолдер, используем первое число
-                    sql = sql.replace('{NUMBER}', numbers[0])
-                    print(f"  Заменен {{NUMBER}} -> {numbers[0]}")
-                elif num_placeholders >= 2 and len(numbers) >= 2:
-                    # Если два плейсхолдера, используем два разных числа
-                    # Первая замена
-                    sql = sql.replace('{NUMBER}', numbers[0], 1)
-                    print(f"  Заменен {{NUMBER}}#1 -> {numbers[0]}")
-                    # Вторая замена
-                    sql = sql.replace('{NUMBER}', numbers[1], 1)
-                    print(f"  Заменен {{NUMBER}}#2 -> {numbers[1]}")
-                    # Если есть еще плейсхолдеры, используем последнее число
-                    while '{NUMBER}' in sql:
-                        sql = sql.replace('{NUMBER}', numbers[-1], 1)
-                        print(f"  Заменен оставшийся {{NUMBER}} -> {numbers[-1]}")
-            
-            # 5.3. Остальные замены
-            for placeholder, value in params.items():
-                if placeholder in sql and placeholder not in ['{YEAR}', '{MONTH}', '{NUMBER2}']:
-                    # Для {NUMBER} уже обработали выше
-                    if placeholder != '{NUMBER}':
-                        sql = sql.replace(placeholder, value)
-                        print(f"  Заменен {placeholder} -> {value}")
-            
-            # 6. Если остались необработанные {NUMBER} и есть год/месяц в запросе
-            if '{NUMBER}' in sql:
-                # Пробуем найти год и месяц по тексту
-                month_year_match = re.search(r'в\s+(\w+)\s+(\d{4})', query_lower)
-                if month_year_match:
-                    month_ru = month_year_match.group(1)
-                    year = month_year_match.group(2)
-                    month_num = self._rus_month_to_num(month_ru)
-                    
-                    if month_num:
-                        # Подсчитываем сколько {NUMBER} осталось
-                        remaining_placeholders = sql.count('{NUMBER}')
-                        
-                        if remaining_placeholders == 2:
-                            # Должно быть: год и месяц
-                            sql = sql.replace('{NUMBER}', year, 1)
-                            sql = sql.replace('{NUMBER}', str(month_num), 1)
-                            print(f"  Автозамена: год={year}, месяц={month_num}")
-                        elif remaining_placeholders == 1:
-                            # Только один - вероятно год
-                            sql = sql.replace('{NUMBER}', year)
-                            print(f"  Автозамена: год={year}")
-            
-            # 7. Исправляем часовые диапазоны
-            if '{HOUR1}' in original_sql and '{HOUR2}' in original_sql:
-                if '{HOUR1}' in params and '{HOUR2}' in params:
-                    hour1 = int(params['{HOUR1}'])
-                    hour2 = int(params['{HOUR2}'])
-                    
-                    # Для BETWEEN: hour1 AND hour2-1
-                    if 'BETWEEN' in sql and hour2 > hour1:
-                        sql = re.sub(
-                            r'BETWEEN\s+' + str(hour1) + r'\s+AND\s+' + str(hour2),
-                            f'BETWEEN {hour1} AND {hour2 - 1}',
-                            sql
-                        )
-            
-            print(f"\nDEBUG _fill_template: Итоговый SQL:")
-            print(f"  {sql}")
-            return sql
+                sql = sql.replace('{NUMBER}', '0', 1)
+                print(f"  Заменен {{NUMBER}} -> 0")
+        
+        print(f"\nDEBUG _fill_template: Итоговый SQL:")
+        print(f"  {sql}")
+        return sql
     
     def _rus_month_to_num(self, month_ru: str) -> Optional[int]:
         """Конвертирует русский месяц в число"""
         month_map = {
+            # родительный падеж
             'января': 1, 'февраля': 2, 'марта': 3, 'апреля': 4,
             'мая': 5, 'июня': 6, 'июля': 7, 'августа': 8,
             'сентября': 9, 'октября': 10, 'ноября': 11, 'декабря': 12,
+            # именительный падеж  
             'январь': 1, 'февраль': 2, 'март': 3, 'апрель': 4,
             'май': 5, 'июнь': 6, 'июль': 7, 'август': 8,
-            'сентябрь': 9, 'октябрь': 10, 'ноябрь': 11, 'декабрь': 12
+            'сентябрь': 9, 'октябрь': 10, 'ноябрь': 11, 'декабрь': 12,
+            # предложный падеж (В июне, В июле)
+            'январе': 1, 'феврале': 2, 'марте': 3, 'апреле': 4,
+            'мае': 5, 'июне': 6, 'июле': 7, 'августе': 8,
+            'сентябре': 9, 'октябре': 10, 'ноябре': 11, 'декабре': 12,
         }
-        return month_map.get(month_ru.lower())
-    
+        
+        month_lower = month_ru.lower()
+        result = month_map.get(month_lower)
+        print(f"DEBUG _rus_month_to_num: '{month_ru}' -> '{month_lower}' -> {result}")
+        return result
+        
     def _learn_from_example(self, query: str, sql: str, words: Set[str], source: str = 'manual'):
         """Сохраняет новый паттерн"""
         if not words:
@@ -667,8 +605,8 @@ class QueryConstructor:
                 'exact_cache': self.exact_cache,
                 'updated_at': datetime.now().isoformat()
             }
-            with open(self.cache_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+           # with open(self.cache_file, 'w', encoding='utf-8') as f:
+               # json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"Ошибка сохранения кэша: {e}")
     
@@ -684,8 +622,8 @@ class QueryConstructor:
                 'updated_at': datetime.now().isoformat()
             }
             
-            with open(self.patterns_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            #with open(self.patterns_file, 'w', encoding='utf-8') as f:
+                #json.dump(data, f, ensure_ascii=False, indent=2)
             
             self._save_cache()
             
@@ -706,7 +644,7 @@ class QueryConstructor:
         words = self._extract_words(query)
         self._learn_from_example(query, sql, words, 'manual')
         self.exact_cache[query] = sql
-        self._save_all_data()
+        #self._save_all_data()
         logger.info(f"Добавлен ручной паттерн: {len(words)} слов")
     
     def clear_cache(self):

@@ -65,7 +65,7 @@ class VideoAnalyticsBot:
         try:
             # /learn Сколько видео? | SELECT COUNT(*) FROM videos
             text = update.message.text.replace('/learn', '').strip()
-            parts = text.split('|', 1)
+            parts = [p.strip() for p in text.split('|', 1)]
             
             if len(parts) != 2:
                 await update.message.reply("Формат: /learn вопрос | SQL")
